@@ -1,0 +1,8 @@
+d_a : 1
+alpha : 1
+d_A: 16
+n_transformer_heads : 2
+n_transformer_layers : 2 
+d_emb : 188
+d_hnet : 128
+dropout : .05
