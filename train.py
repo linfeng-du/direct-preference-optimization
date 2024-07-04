@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn as nn
@@ -13,6 +14,13 @@ import json
 import socket
 from typing import Optional, Set
 import resource
+from transformers import LlamaModel, LlamaConfig,LlamaForCausalLM
+from hnet.hypernet import HyperNetController, HyperNet, HyperNetLinear
+os.environ['TRANSFORMERS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
+os.environ['HF_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
+os.environ['HF_DATASETS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
+os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
+cache_dir = '/home/mila/e/emiliano.penaloza/scratch/models'
 
 
 OmegaConf.register_new_resolver("get_local_run_dir", lambda exp_name, local_dirs: get_local_run_dir(exp_name, local_dirs))
@@ -20,6 +28,21 @@ OmegaConf.register_new_resolver("get_local_run_dir", lambda exp_name, local_dirs
 
 def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Module, reference_model: Optional[nn.Module] = None):
     """Main function for each worker process (may be only 1 for BasicTrainer/TensorParallelTrainer)."""
+    if config.use_hnet: 
+            kvq = 3 
+            a_b = 2 
+            configuration = policy.config
+            d_model = configuration.hidden_size
+            output_dim = configuration.num_hidden_layers * (config.hnet.d_a *  config.hnet.d_A ) * a_b   *  kvq
+            
+            hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
+            controller = HyperNetController(hypernet,target_modules = ['query_key_value'], 
+                                            d_model = d_model,
+                                            A = config.hnet.d_A,
+                                            a = config.hnet.d_a)
+            controller.augmentLLM(policy)
+            controller.freezeParams(policy, False)
+
     if 'FSDP' in config.trainer:
         init_distributed(rank, world_size, port=config.fsdp_port)
     
@@ -38,8 +61,9 @@ def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Modul
         )
 
     TrainerClass = getattr(trainers, config.trainer)
+
     print(f'Creating trainer on process {rank} with world size {world_size}')
-    trainer = TrainerClass(policy, config, config.seed, config.local_run_dir, reference_model=reference_model, rank=rank, world_size=world_size)
+    trainer = TrainerClass(policy, config, config.seed, config.local_run_dir, reference_model=reference_model, rank=rank, world_size=world_size,hnet_controller = controller)
 
     trainer.train()
     trainer.save()
@@ -80,19 +104,73 @@ def main(config: DictConfig):
     print('building policy')
     model_kwargs = {'device_map': 'balanced'} if config.trainer == 'BasicTrainer' else {}
     policy_dtype = getattr(torch, config.model.policy_dtype)
-    policy = transformers.AutoModelForCausalLM.from_pretrained(
-        config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=policy_dtype, **model_kwargs)
-    disable_dropout(policy)
+    if config.use_hnet and config.debug:
+        
 
-    if config.loss.name in {'dpo', 'ipo'}:
+        # Initializing a LLaMA llama-7b style configuration
+        configuration = LlamaConfig()
+        configuration.num_hidden_layers = 2
+        configuration.num_attention_heads = 2
+        configuration.num_key_value_heads = 2
+        policy = LlamaForCausalLM(configuration)
+        d_model = configuration.hidden_size
+        kvq = 3 
+        a_b = 2 
+        d_model = configuration.hidden_size
+        output_dim = configuration.num_hidden_layers * (config.hnet.d_a *  config.hnet.d_A ) * a_b   *  kvq
+
+        hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
+        controller = HyperNetController(hypernet,target_modules = ['q_proj','k_proj','v_proj'], 
+                                        d_model = d_model,
+                                        A = config.hnet.d_A,
+                                        a = config.hnet.d_a)
+        controller.augmentLLM(policy)
+        controller.freezeParams(policy, False)
+        # user_embeddings = np.load('/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/user_embeddings.npy').tolist()
+        # config.user_embeddings = user_embeddings
+
+
+    else:        
+        policy = transformers.AutoModelForCausalLM.from_pretrained(
+            config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=policy_dtype, **model_kwargs)
+        # if config.use_hnet: 
+        #     kvq = 3 
+        #     a_b = 2 
+        #     configuration = policy.config
+        #     d_model = configuration.hidden_size
+        #     output_dim = configuration.num_hidden_layers * (config.hnet.d_a *  config.hnet.d_A ) * a_b   *  kvq
+            
+        #     hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
+        #     controller = HyperNetController(hypernet,target_modules = ['query_key_value'], 
+        #                                     d_model = d_model,
+        #                                     A = config.hnet.d_A,
+        #                                     a = config.hnet.d_a)
+        #     controller.augmentLLM(policy)
+        #     controller.freezeParams(policy, False)
+
+            
+    disable_dropout(policy)
+    #policy forward pass base llm + adaptors
+    #reference policy is being loaded into memory on its own
+    #reference policy = policy - adaptors
+    #reference policy = policy with adaptors disabled
+
+    if config.loss.name in {'dpo', 'ipo'} :
         print('building reference model')
         reference_model_dtype = getattr(torch, config.model.reference_dtype)
         reference_model = transformers.AutoModelForCausalLM.from_pretrained(
             config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=reference_model_dtype, **model_kwargs)
         disable_dropout(reference_model)
+    elif config.debug:
+        
+        configuration.num_hidden_layers = 2
+        configuration.num_attention_heads = 16
+        configuration.num_key_value_heads = 2
+        reference_model = LlamaForCausalLM(configuration)
+        
     else:
         reference_model = None
-
+    
     if config.model.archive is not None:
         state_dict = torch.load(config.model.archive, map_location='cpu')
         step, metrics = state_dict['step_idx'], state_dict['metrics']
@@ -108,6 +186,7 @@ def main(config: DictConfig):
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
         print(f'setting RLIMIT_NOFILE soft limit to {hard} from {soft}')
+        mp.set_start_method('forkserver')
         mp.spawn(worker_main, nprocs=world_size, args=(world_size, config, policy, reference_model), join=True)
     else:
         print('starting single-process worker')

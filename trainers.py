@@ -15,7 +15,7 @@ from torch.distributed.fsdp import (
     CPUOffload,
 )
 from torch.distributed.fsdp.api import FullStateDictConfig, FullOptimStateDictConfig
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy,size_based_auto_wrap_policy
 import tensor_parallel as tp
 import contextlib
 
@@ -139,11 +139,13 @@ def concatenated_inputs(batch: Dict[str, Union[List, torch.LongTensor]]) -> Dict
                 concatenated_batch[concatenated_key],
                 pad_to_length(batch[k], max_length, pad_value=pad_value),
             ), dim=0)
+
+
     return concatenated_batch
 
 
 class BasicTrainer(object):
-    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1):
+    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1, **kwargs):
         """A trainer for a language model, supporting either SFT or DPO training.
            
            If multiple GPUs are present, naively splits the model across them, effectively
@@ -170,11 +172,13 @@ class BasicTrainer(object):
             sft_mode=config.loss.name == 'sft',
         )
 
+
         self.policy = policy
         self.reference_model = reference_model
 
         self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
         rank0_print(f'Loaded train data iterator')
+
         self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
         self.eval_batches = list(self.eval_iterator)
         rank0_print(f'Loaded {len(self.eval_batches)} eval batches of size {config.eval_batch_size}')
@@ -226,7 +230,16 @@ class BasicTrainer(object):
         metrics = {}
         train_test = 'train' if train else 'eval'
 
+
         if loss_config.name in {'dpo', 'ipo'}:
+            if self.config.use_hnet: 
+                
+                layers = self.hnet_controller.hyper_net(batch['user_emb'])
+                self.hnet_controller.updateLayers(layers)
+                
+
+                
+
             policy_chosen_logps, policy_rejected_logps = self.concatenated_forward(self.policy, batch)
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
@@ -269,13 +282,22 @@ class BasicTrainer(object):
 
         return losses.mean(), metrics
 
+
+
     def train(self):
         """Begin either SFT or DPO training, with periodic evaluation."""
 
         rank0_print(f'Using {self.config.optimizer} optimizer')
-        self.optimizer = getattr(torch.optim, self.config.optimizer)(self.policy.parameters(), lr=self.config.lr)
+        if self.config.use_hnet:
+            self.optimizer = getattr(torch.optim, self.config.optimizer)(self.hnet_controller.hyper_net.parameters(), lr=self.config.lr)
+
+
+        else:
+            self.optimizer = getattr(torch.optim, self.config.optimizer)(self.policy.parameters(), lr=self.config.lr)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / (self.config.warmup_steps + 1)))
-    
+        
+ 
+            
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
         random.seed(self.seed)
@@ -292,6 +314,8 @@ class BasicTrainer(object):
             if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
                 rank0_print(f'Running evaluation after {self.example_counter} train examples')
                 self.policy.eval()
+                self.hnet_controller.hyper_net.eval()
+                
 
                 all_eval_metrics = defaultdict(list)
                 if self.config.sample_during_eval:
@@ -353,7 +377,11 @@ class BasicTrainer(object):
             #### END EVALUATION ####
 
             #### BEGIN TRAINING ####
-            self.policy.train()
+            if self.config.use_hnet:
+                self.hnet_controller.hyper_net.train()
+                self.policy.eval()
+            else:
+                self.policy.train()
 
             start_time = time.time()
             batch_metrics = defaultdict(list)
@@ -363,12 +391,17 @@ class BasicTrainer(object):
                 loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
                 (loss / self.config.gradient_accumulation_steps).backward()
 
+
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
 
             grad_norm = self.clip_gradient()
+
             self.optimizer.step()
             self.scheduler.step()
+
+            # print(f"{list(self.hnet_controller.hyper_net.transformer_encoder.parameters())[0]=}")
+
             self.optimizer.zero_grad()
 
             step_time = time.time() - start_time
@@ -425,6 +458,18 @@ class BasicTrainer(object):
 
         scheduler_state_dict = self.scheduler.state_dict()
         self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
+
+
+class HnetTRainer(BasicTrainer):
+    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1,hnet_controller = None):
+        """A trainer subclass that uses a hypernetwork to generate the policy model.
+        
+           The hypernetwork is a separate model that generates the weights of the policy model.
+        """
+        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
+        self.hnet_controller = hnet_controller
+        
+
 
 
 class FSDPTrainer(BasicTrainer):
@@ -542,4 +587,40 @@ class TensorParallelTrainer(BasicTrainer):
     
         self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
         del policy_state_dict
+        
+        
+class FSDPHnetTrainer(FSDPTrainer):
+    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1, hnet_controller = None):
+        """A trainer subclass that uses PyTorch FSDP to shard the hypernetwork and policy model across multiple GPUs.
+        
+           This trainer will shard both the policy and hypernetwork across all available GPUs.
+           Models are sharded at the block level, where the block class name is provided in the config.
+        """
+        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
+        self.hnet_controller = hnet_controller
+        self.hnet = hnet_controller.hyper_net
+        wrap_class = get_block_class_from_model(self.hnet, 'HyperNet')
+
+        model_auto_wrap_policy = functools.partial(
+        size_based_auto_wrap_policy, min_num_params=2000
+    )
+
+        
+        shared_fsdp_kwargs = dict(
+            auto_wrap_policy=model_auto_wrap_policy,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            cpu_offload=CPUOffload(offload_params=False),
+            backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+            device_id=rank,
+            ignored_modules=None,
+            limit_all_gathers=False,
+            use_orig_params=False,
+            sync_module_states=False
+        )
+        rank0_print('Sharding Hnet...')
+        mp_dtype = getattr(torch, config.model.fsdp_policy_mp) if config.model.fsdp_policy_mp is not None else None
+        policy_mp_policy = MixedPrecision(param_dtype=mp_dtype, reduce_dtype=mp_dtype, buffer_dtype=mp_dtype)
+        self.hnet = FSDP(self.hnet, **shared_fsdp_kwargs, mixed_precision=policy_mp_policy)
+
+        
         

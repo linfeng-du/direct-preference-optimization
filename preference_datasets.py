@@ -1,3 +1,7 @@
+import os 
+import pickle
+import json
+import pandas as pd
 import datasets
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -81,6 +85,107 @@ def get_se(split, silent=False, cache_dir: str = None) -> Dict[str, Dict[str, Un
         data[prompt]['sft_target'] = max(responses, key=lambda x: scores[responses.index(x)])
 
     return data
+def preprocess_prism(split= 'train'):
+        #load json data /home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/train_data.json
+
+    # Initialize an empty list to store the JSON objects
+    #/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.csv does not exits
+    if not os.path.exists(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl'):    
+        data = []
+
+        # Open the file and read the lines
+
+        with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.json', 'r') as file:
+            for line in file:
+                # Parse each line as a JSON object and append it to the list
+                if line:
+                    try:
+                        # Parse each line as a JSON object and append it to the list
+                        data.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        print(f"Error decoding JSON on line: {line}\nError: {e}")
+
+        df = pd.DataFrame(data)
+        dfs_uid = df.groupby('user_id')
+        processed_data = []
+        for i,(uid, df_uid) in enumerate(dfs_uid):
+            df_utt = df_uid.groupby('interaction_id')
+            for j,(utt, df_utt) in enumerate(df_utt):
+
+                if len(df_utt) >=  2:
+                    try:
+                        if len(df_utt[df_utt['if_chosen'] == True]) >= 2:
+                            #take the one with the higher score 
+                            df_score_1 = df_utt.score.values[0]
+                            df_score_2 = df_utt.score.values[1]
+                            if df_score_1 > df_score_2:
+                                chosen = df_utt.model_response.values[0]
+                                non_chosen = df_utt.model_response.values[1]
+                            elif df_score_1 < df_score_2:
+                                chosen = df_utt.model_response.values[1]
+                                non_chosen = df_utt.model_response.values[0]
+
+                            else:
+                        
+                                continue
+                        else:
+                            chosen = df_utt[df_utt['if_chosen'] == True].model_response.values[0]
+                            non_chosen = df_utt[df_utt['if_chosen'] == False].model_response.values[0]
+                        # print(f"{df_utt[df_utt['if_chosen'] == False].model_response=}")
+
+
+                        user_prompt = df_utt['user_prompt'].values[0]
+                        user_id = df_utt['user_id'].values[0]
+                        processed_data.append([user_id, user_prompt, chosen, non_chosen])
+                    except:
+                        print(f"{df_utt[df_utt['if_chosen'] == False].model_response=}")
+
+                        print('error')
+                        raise Exception
+                else:
+                    print('no match')
+                continue
+
+
+
+            with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl', 'wb+') as f:
+                pickle.dump(processed_data, f)
+
+    else: 
+
+        
+        with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl', 'rb+') as f:
+            processed_data = pickle.load( f)
+
+
+        
+    return processed_data
+
+
+def get_prsim(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+
+    processed_data = preprocess_prism(split)
+
+    data = defaultdict(lambda: defaultdict(list))
+    user_embeddings = np.load('/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/user_embeddings.npy').tolist()
+
+
+    for example in processed_data:
+
+
+        prompt = '\n\n Human: ' + example[1] + "\n\n Assistant:"
+        uid = int(example[0].replace('user',''))
+        data[prompt]['user_id'] = uid
+        if len(user_embeddings[uid]) == 187:
+            user_embeddings[uid] = user_embeddings[uid] + [0]
+        data[prompt]['user_emb'] = user_embeddings[uid]
+        responses = [example[2], example[3]]
+        n_responses = len(data[prompt]['responses'])
+        data[prompt]['pairs'].append((n_responses, n_responses + 1))
+        data[prompt]['responses'].extend(responses)
+
+        data[prompt]['sft_target'].append('')
+    return data
 
 def get_shp(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
     """Load the Stanford Human Preferences dataset from Huggingface and convert it to the necessary format. See hh for the format.
@@ -153,14 +258,20 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
         prompt, chosen, rejected = split_prompt_and_responses(row)
         responses = [chosen, rejected]
         n_responses = len(data[prompt]['responses'])
+        
         data[prompt]['pairs'].append((n_responses, n_responses + 1))
         data[prompt]['responses'].extend(responses)
         data[prompt]['sft_target'] = chosen
+
+    print(f"{data.keys()=}")
+    print(f"{data[prompt]=}")
 
     return data
 
 
 def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None):
+    print(f"{name=}")
+
     """Load the given dataset by name. Supported by default are 'shp', 'hh', and 'se'."""
     if name == 'shp':
         data = get_shp(split, silent=silent, cache_dir=cache_dir)
@@ -168,10 +279,12 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
         data = get_hh(split, silent=silent, cache_dir=cache_dir)
     elif name == 'se':
         data = get_se(split, silent=silent, cache_dir=cache_dir)
+    elif name == 'prism':
+        data = get_prsim(split, silent=silent, cache_dir=cache_dir)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 
-    assert set(list(data.values())[0].keys()) == {'responses', 'pairs', 'sft_target'}, \
+    assert set(list(data.values())[0].keys()) == {'responses', 'pairs', 'sft_target'} or set(list(data.values())[0].keys()) == {'responses', 'pairs', 'sft_target','user_id','user_emb'}, \
         f"Unexpected keys in dataset: {list(list(data.values())[0].keys())}"
 
     return data
@@ -184,6 +297,8 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
          ints [tokens] or strings [the original texts]) and returns a batch of examples,
          PyTorch tensors padded to the maximum length. Strings are passed through."""
     def collate_fn(batch):
+
+        
         # first, pad everything to the same length
         padded_batch = {}
         for k in batch[0].keys():
@@ -222,6 +337,7 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
          the sum of the length of the prompt and the chosen/rejected response, with -100 for the
          prompt tokens.
     """
+
     chosen_tokens = tokenizer(chosen, add_special_tokens=False)
     rejected_tokens = tokenizer(rejected, add_special_tokens=False)
     prompt_tokens = tokenizer(prompt, add_special_tokens=False)
@@ -263,10 +379,13 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
     batch = {}
 
     batch['prompt'] = prompt
+
     batch['chosen'] = prompt + chosen
+    
     batch['rejected'] = prompt + rejected
     batch['chosen_response_only'] = chosen
     batch['rejected_response_only'] = rejected
+
 
     for k, toks in {'chosen': chosen_sequence_tokens, 'rejected': rejected_sequence_tokens, 'prompt': prompt_tokens}.items():
         for type_key, tokens in toks.items():
@@ -317,8 +436,14 @@ def get_batch_iterator(names: List[str],
         flat_data = []
         for name in names:
             truncation_mode = 'keep_end' if name == 'hh' else 'keep_start'
+  
             for prompt, data in get_dataset(name, split, silent=silent, cache_dir=cache_dir).items():
-                flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
+
+                if 'user_id' in data:
+
+                    flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'],truncation_mode,data['user_id'],data['user_emb']))
+                else:
+                    flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
 
     collate_fn = get_collate_fn(tokenizer)
 
@@ -335,12 +460,23 @@ def get_batch_iterator(names: List[str],
                 random.shuffle(flat_data)
 
         batch = []
-        for prompt, responses, pairs, sft_target, truncation_mode in flat_data:
+
+        for step in flat_data:
+
+            if len(step)  == 5:
+                prompt, responses, pairs, sft_target, truncation_mode = step
+                uid = None 
+            else:
+                prompt, responses, pairs, sft_target, truncation_mode,uid,user_emb = step 
+
             if done:
                 break
             if sft_mode:
                 batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length)
                 batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
+                if uid is not None:
+                    batch_element['user_id'] = uid
+                    batch_element['user_emb'] = user_emb
                 batch.append(batch_element)
                 example_idx += 1
                 if len(batch) == batch_size:
@@ -356,6 +492,9 @@ def get_batch_iterator(names: List[str],
                     if done:
                         break
                     batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, tokenizer, max_length, max_prompt_length)
+                    if uid is not None:
+                        batch_element['user_id'] = uid
+                        batch_element['user_emb'] = user_emb
                     batch.append(batch_element)
                     example_idx += 1
                     if len(batch) == batch_size:

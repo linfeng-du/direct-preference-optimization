@@ -62,7 +62,10 @@ def get_local_run_dir(exp_name: str, local_dirs: List[str]) -> str:
 
 
 def slice_and_move_batch_for_device(batch: Dict, rank: int, world_size: int, device: str) -> Dict:
+
     """Slice a batch into chunks, and move each chunk to the specified device."""
+    if 'user_emb' in batch:
+        batch['user_emb'] = torch.tensor(batch['user_emb']).to(device)
     chunk_size = len(list(batch.values())[0]) // world_size
     start = chunk_size * rank
     end = chunk_size * (rank + 1)
@@ -120,8 +123,10 @@ def print_gpu_memory(rank: int = None, message: str = ''):
 def get_block_class_from_model(model: torch.nn.Module, block_class_name: str) -> torch.nn.Module:
     """Get the class of a block from a model, using the block's class name."""
     for module in model.modules():
+
         if module.__class__.__name__ == block_class_name:
             return module.__class__
+
     raise ValueError(f"Could not find block class {block_class_name} in model {model}")
 
 
