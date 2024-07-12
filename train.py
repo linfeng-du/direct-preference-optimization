@@ -1,4 +1,6 @@
+from peft import LoraConfig, get_peft_model, TaskType
 import numpy as np
+import peft
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn as nn
@@ -14,13 +16,26 @@ import json
 import socket
 from typing import Optional, Set
 import resource
+from hnet.lora import LoRA_controller, LoRA
 from transformers import LlamaModel, LlamaConfig,LlamaForCausalLM
-from hnet.hypernet import HyperNetController, HyperNet, HyperNetLinear
+from hnet.hypernet import HyperNetController, HyperNet, HyperNetLinear,PolicyWrapper
 os.environ['TRANSFORMERS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 os.environ['HF_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 os.environ['HF_DATASETS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
 cache_dir = '/home/mila/e/emiliano.penaloza/scratch/models'
+
+def print_trainable_params(model):
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if num_params >= 1e9:
+        formatted_params = f'{num_params / 1e9:.2f}B'
+    elif num_params >= 1e6:
+        formatted_params = f'{num_params / 1e6:.2f}M'
+    else:
+        formatted_params = f'{num_params:,}'
+    
+    print(f'Number of trainable parameters: {formatted_params}')
+
 
 
 OmegaConf.register_new_resolver("get_local_run_dir", lambda exp_name, local_dirs: get_local_run_dir(exp_name, local_dirs))
@@ -28,21 +43,34 @@ OmegaConf.register_new_resolver("get_local_run_dir", lambda exp_name, local_dirs
 
 def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Module, reference_model: Optional[nn.Module] = None):
     """Main function for each worker process (may be only 1 for BasicTrainer/TensorParallelTrainer)."""
+
     if config.use_hnet: 
             kvq = 3 
             a_b = 2 
             configuration = policy.config
             d_model = configuration.hidden_size
             output_dim = configuration.num_hidden_layers * (config.hnet.d_a *  config.hnet.d_A ) * a_b   *  kvq
-            
-            hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
-            controller = HyperNetController(hypernet,target_modules = ['query_key_value'], 
+            hypernet,controller = get
+            hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,config.hnet.d_hnet,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
+            controller = HyperNetController(config,hypernet,target_modules = config.model.target_modules, 
                                             d_model = d_model,
                                             A = config.hnet.d_A,
                                             a = config.hnet.d_a)
             controller.augmentLLM(policy)
             controller.freezeParams(policy, False)
+            policy = PolicyWrapper(hypernet,policy)
+            #print number of trainable parameters 
 
+            print_trainable_params(hypernet)
+    elif config.use_lora:
+        controller = LoRA_controller(config.lora,config.lora.r,target_modules = config.model.target_modules)
+        
+
+    else:
+        controller = None
+        hypernet = None
+    print_trainable_params(policy)
+    
     if 'FSDP' in config.trainer:
         init_distributed(rank, world_size, port=config.fsdp_port)
     
@@ -51,7 +79,7 @@ def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Modul
         wandb.log = lambda *args, **kwargs: None
 
     if rank == 0 and config.wandb.enabled:
-        os.environ['WANDB_CACHE_DIR'] = get_local_dir(config.local_dirs)
+        os.environ['WANDB_CACHE_DIR'] = cache_dir
         wandb.init(
             entity=config.wandb.entity,
             project=config.wandb.project,
@@ -64,9 +92,15 @@ def worker_main(rank: int, world_size: int, config: DictConfig, policy: nn.Modul
 
     print(f'Creating trainer on process {rank} with world size {world_size}')
     trainer = TrainerClass(policy, config, config.seed, config.local_run_dir, reference_model=reference_model, rank=rank, world_size=world_size,hnet_controller = controller)
+    if config.use_lora:
+        controller.augmentLLM(trainer.policy)
+        controller.freezeParams(trainer.policy, False)
+        print('Using Lora')
 
+    
     trainer.train()
-    trainer.save()
+    if config.save:
+        trainer.save()
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
@@ -75,7 +109,6 @@ def main(config: DictConfig):
 
     # Resolve hydra references, e.g. so we don't re-compute the run directory
     OmegaConf.resolve(config)
-
     missing_keys: Set[str] = OmegaConf.missing_keys(config)
     if missing_keys:
         raise ValueError(f"Got missing keys in config:\n{missing_keys}")
@@ -91,6 +124,7 @@ def main(config: DictConfig):
         config.fsdp_port = free_port
 
     print(OmegaConf.to_yaml(config))
+    # assert config.use_hnet != config.use_lora, 'Cannot use both Hnet and Lora at the same time, siable use_lora or use_hnet'
 
     config_path = os.path.join(config.local_run_dir, 'config.yaml')
     with open(config_path, 'w') as f:
@@ -102,7 +136,11 @@ def main(config: DictConfig):
  
     os.environ['XDG_CACHE_HOME'] = get_local_dir(config.local_dirs)
     print('building policy')
-    model_kwargs = {'device_map': 'balanced'} if config.trainer == 'BasicTrainer' else {}
+    if config.use_lora:
+        device_map = {"": "cuda:" + str(int(os.environ.get("LOCAL_RANK") or 0))}
+    else:
+        device_map = {'device_map': 'balanced'}
+    model_kwargs = device_map if config.trainer == 'BasicTrainer' else {}
     policy_dtype = getattr(torch, config.model.policy_dtype)
     if config.use_hnet and config.debug:
         
@@ -120,7 +158,7 @@ def main(config: DictConfig):
         output_dim = configuration.num_hidden_layers * (config.hnet.d_a *  config.hnet.d_A ) * a_b   *  kvq
 
         hypernet = HyperNet(config.hnet.alpha, config.hnet.dropout, config.hnet.d_A,config.hnet.d_a,output_dim,config.hnet.d_emb,  config.hnet.n_transformer_layers,configuration.num_hidden_layers ,config.hnet.n_transformer_heads)
-        controller = HyperNetController(hypernet,target_modules = ['q_proj','k_proj','v_proj'], 
+        controller = HyperNetController(hypernet,target_modules =config.model.target_modules, 
                                         d_model = d_model,
                                         A = config.hnet.d_A,
                                         a = config.hnet.d_a)
@@ -130,9 +168,22 @@ def main(config: DictConfig):
         # config.user_embeddings = user_embeddings
 
 
-    else:        
+    else:
         policy = transformers.AutoModelForCausalLM.from_pretrained(
-            config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=policy_dtype, **model_kwargs)
+            config.model.name_or_path, cache_dir=cache_dir, low_cpu_mem_usage=True, torch_dtype=policy_dtype,device_map= 'balanced')
+        #print number of parameters in policy
+        print_trainable_params(policy)
+        # if config.use_lora:
+        #     lora_config = LoraConfig(
+        #                     r=config.lora.r,
+        #                     lora_alpha=32,
+        #                     target_modules=config.model.target_modules,
+        #                     lora_dropout=0.,
+        #                     bias="none",
+        #                     task_type="CAUSAL_LM"
+        #                     )
+        #     policy = get_peft_model(policy, lora_config)
+        #     print('Using Lora')
         # if config.use_hnet: 
         #     kvq = 3 
         #     a_b = 2 
@@ -159,7 +210,7 @@ def main(config: DictConfig):
         print('building reference model')
         reference_model_dtype = getattr(torch, config.model.reference_dtype)
         reference_model = transformers.AutoModelForCausalLM.from_pretrained(
-            config.model.name_or_path, cache_dir=get_local_dir(config.local_dirs), low_cpu_mem_usage=True, torch_dtype=reference_model_dtype, **model_kwargs)
+            config.model.name_or_path, cache_dir=cache_dir, low_cpu_mem_usage=True, torch_dtype=reference_model_dtype, device_map= 'balanced')
         disable_dropout(reference_model)
     elif config.debug:
         
@@ -190,6 +241,7 @@ def main(config: DictConfig):
         mp.spawn(worker_main, nprocs=world_size, args=(world_size, config, policy, reference_model), join=True)
     else:
         print('starting single-process worker')
+        
         worker_main(0, 1, config, policy, reference_model)
 
 

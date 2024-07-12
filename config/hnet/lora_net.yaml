@@ -1,0 +1,5 @@
+r : 16
+dropout : .0
+hnet_forward : false
+d_model : null
+d_emb : 188

@@ -90,12 +90,12 @@ def preprocess_prism(split= 'train'):
 
     # Initialize an empty list to store the JSON objects
     #/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.csv does not exits
-    if not os.path.exists(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl'):    
+    if not os.path.exists(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl'):    
         data = []
 
         # Open the file and read the lines
 
-        with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.json', 'r') as file:
+        with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.json', 'r') as file:
             for line in file:
                 # Parse each line as a JSON object and append it to the list
                 if line:
@@ -148,13 +148,13 @@ def preprocess_prism(split= 'train'):
 
 
 
-            with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl', 'wb+') as f:
+            with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl', 'wb+') as f:
                 pickle.dump(processed_data, f)
 
     else: 
 
         
-        with open(f'/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.pkl', 'rb+') as f:
+        with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl', 'rb+') as f:
             processed_data = pickle.load( f)
 
 
@@ -298,10 +298,15 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
          PyTorch tensors padded to the maximum length. Strings are passed through."""
     def collate_fn(batch):
 
+
         
         # first, pad everything to the same length
         padded_batch = {}
+
+        batch = sum(batch, [])
+
         for k in batch[0].keys():
+
             if k.endswith('_input_ids') or k.endswith('_attention_mask') or k.endswith('_labels'):
                 if 'prompt' in k:  # adapted from https://stackoverflow.com/questions/73256206
                     to_pad = [torch.LongTensor(ex[k][::-1]) for ex in batch]
@@ -319,8 +324,13 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
                 padded_batch[k] = pad_sequence(to_pad, batch_first=True, padding_value=padding_value)
                 if 'prompt' in k:  # for the prompt, flip back so padding is on left side
                     padded_batch[k] = padded_batch[k].flip(dims=[1])
+            elif k == 'user_emb':
+                padded_batch[k] = torch.tensor([ex[k] for ex in batch]).to(torch.bfloat16)
+
             else:
                 padded_batch[k] = [ex[k] for ex in batch]
+
+
 
         return padded_batch
     return collate_fn
@@ -396,6 +406,40 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
     return batch
 
 
+class RLHFDataset(Dataset):
+    """Dataset class for RLHF data."""
+    def __init__(self, names: List[str], tokenizer, shuffle : bool = True,split: str = 'train', max_length: int = 512, max_prompt_length: int = 128, sft_mode: bool = False, n_epochs: Optional[int] = None, n_examples: Optional[int] = None, seed: int = 0, silent: bool = False, cache_dir: Optional[str] = None):
+        self.names = names
+        self.tokenizer = tokenizer
+        self.split = split
+        self.max_length = max_length
+        self.max_prompt_length = max_prompt_length
+        self.sft_mode = sft_mode
+        self.n_epochs = n_epochs
+        self.n_examples = n_examples
+        self.seed = seed
+        self.silent = silent
+        self.cache_dir = cache_dir
+        self.shuffle = shuffle
+
+
+        self.batch_iterator = list(get_batch_iterator(self.names, self.tokenizer, self.split,shuffle=self.shuffle, max_length=self.max_length, max_prompt_length=self.max_prompt_length, sft_mode=self.sft_mode, n_epochs=self.n_epochs if split=='train' else 1, seed=self.seed, silent=self.silent, cache_dir=self.cache_dir))
+
+        
+
+    def __len__(self):
+        return self.n_examples if self.n_examples is not None else len(self.batch_iterator)
+
+    def __getitem__(self, idx):
+
+            
+
+        return self.batch_iterator[idx]
+    def collate_fn(self, batch):
+
+
+        return get_collate_fn(self.tokenizer)(batch)
+
 def get_batch_iterator(names: List[str],
                        tokenizer,
                        split: str = 'train',
@@ -445,6 +489,7 @@ def get_batch_iterator(names: List[str],
                 else:
                     flat_data.append((prompt, data['responses'], data['pairs'], data['sft_target'], truncation_mode))
 
+
     collate_fn = get_collate_fn(tokenizer)
 
     epoch_idx = 0
@@ -472,8 +517,9 @@ def get_batch_iterator(names: List[str],
             if done:
                 break
             if sft_mode:
-                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length)
-                batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
+                # batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length)
+                # batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
+                batch_element = {}
                 if uid is not None:
                     batch_element['user_id'] = uid
                     batch_element['user_emb'] = user_emb
@@ -492,13 +538,15 @@ def get_batch_iterator(names: List[str],
                     if done:
                         break
                     batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, tokenizer, max_length, max_prompt_length)
+                    # batch_element = {'prompt' : prompt, 'chosen' : responses[p[0]], 'rejected' : responses[p[1]], 'chosen_response_only' : responses[p[0]], 'rejected_response_only' : responses[p[1]]}
                     if uid is not None:
                         batch_element['user_id'] = uid
                         batch_element['user_emb'] = user_emb
                     batch.append(batch_element)
                     example_idx += 1
                     if len(batch) == batch_size:
-                        yield collate_fn(batch)
+                        # yield collate_fn(batch)
+                        yield batch
                         if n_examples is not None and example_idx >= n_examples:
                             if not silent:
                                 print(f'FINISHED {n_examples} EXAMPLES on {split} split')

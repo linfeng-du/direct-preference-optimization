@@ -1,0 +1,12 @@
+d_a : 16
+alpha : 16
+d_A: 64
+n_transformer_heads : 1
+n_transformer_layers : 1
+d_emb : 188
+d_hnet : 128
+dropout : .0
+use_dummies : true 
+hnet_forward : false
+r : 16
+d_model : null

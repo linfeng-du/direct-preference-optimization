@@ -6,3 +6,4 @@ block_name: GPT2Block
 policy_dtype: float32
 fsdp_policy_mp: null
 reference_dtype: float16
+target_modules: ['']

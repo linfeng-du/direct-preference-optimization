@@ -74,6 +74,7 @@ def slice_and_move_batch_for_device(batch: Dict, rank: int, world_size: int, dev
     return on_device
 
 
+
 def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:
     if tensor.size(dim) >= length:
         return tensor
@@ -85,6 +86,7 @@ def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float
 
 def all_gather_if_needed(values: torch.Tensor, rank: int, world_size: int) -> torch.Tensor:
     """Gather and stack/cat values from all processes, if there are multiple processes."""
+    print(f"{world_size=}")
     if world_size == 1:
         return values
 
