@@ -90,12 +90,12 @@ def preprocess_prism(split= 'train'):
 
     # Initialize an empty list to store the JSON objects
     #/home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/{split}_data.csv does not exits
-    if not os.path.exists(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl'):    
+    if not os.path.exists(f'./data/{split}_data.pkl'):    
         data = []
 
         # Open the file and read the lines
 
-        with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.json', 'r') as file:
+        with open(f'./data/{split}_data.json', 'r') as file:
             for line in file:
                 # Parse each line as a JSON object and append it to the list
                 if line:
@@ -148,13 +148,13 @@ def preprocess_prism(split= 'train'):
 
 
 
-            with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl', 'wb+') as f:
+            with open(f'./data/{split}_data.pkl', 'wb+') as f:
                 pickle.dump(processed_data, f)
 
     else: 
 
         
-        with open(f'/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/{split}_data.pkl', 'rb+') as f:
+        with open(f'./data/{split}_data.pkl', 'rb+') as f:
             processed_data = pickle.load( f)
 
 
@@ -167,7 +167,7 @@ def get_prsim(split: str, silent: bool = False, cache_dir: str = None) -> Dict[s
     processed_data = preprocess_prism(split)
 
     data = defaultdict(lambda: defaultdict(list))
-    user_embeddings = np.load('/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/user_embeddings.npy').tolist()
+    user_embeddings = np.load('./data/user_embeddings.npy').tolist()
 
 
     for example in processed_data:

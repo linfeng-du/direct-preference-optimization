@@ -1,5 +1,6 @@
 from peft import LoraConfig, get_peft_model, TaskType
 import numpy as np
+from reward_model.reward_model import RewardModel
 import peft
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -23,11 +24,11 @@ from hnet.hypernet import HyperNetController, HyperNet, HyperNetLinear,PolicyWra
 from accelerate import Accelerator
 
 
-os.environ['TRANSFORMERS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['HF_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['HF_DATASETS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-cache_dir = '/home/mila/e/emiliano.penaloza/scratch/models'
+os.environ['TRANSFORMERS_CACHE'] = '../scratch/models'
+os.environ['HF_HOME'] = '../scratch/models'
+os.environ['HF_DATASETS_CACHE'] = '../scratch/models'
+os.environ['TORCH_HOME'] = '../scratch/models'
+cache_dir = '../scratch/models'
 
 def print_trainable_params(model):
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -47,7 +48,7 @@ OmegaConf.register_new_resolver("get_local_run_dir", lambda exp_name, local_dirs
 
 def worker_main(accelerator,rank: int, world_size: int, config: DictConfig, policy: nn.Module, reference_model: Optional[nn.Module] = None):
     """Main function for each worker process (may be only 1 for BasicTrainer/TensorParallelTrainer)."""
-    if config.use_hnet: 
+    if config.use_hnet and not config.train_reward: 
 
             configuration = policy.config
             config.hnet.n_layers = configuration.num_hidden_layers
@@ -98,7 +99,7 @@ def worker_main(accelerator,rank: int, world_size: int, config: DictConfig, poli
             name=config.exp_name,
         )
 
-      
+    # THIS WILL BE BASIC TRAINER ALWAYS 
     TrainerClass = getattr(trainers, config.trainer)
 
     print(f'Creating trainer on process {rank} with world size {world_size}')
@@ -112,8 +113,10 @@ def worker_main(accelerator,rank: int, world_size: int, config: DictConfig, poli
     accelerator.wait_for_everyone()
 
 
-
-    trainer.train()
+    if config.train_reward:
+        trainer.train_reward_model()
+    else:
+        trainer.train()
     if config.save:
         trainer.save()
 
@@ -124,6 +127,7 @@ def main(config: DictConfig):
     accelerator = Accelerator()
     # Resolve hydra references, e.g. so we don't re-compute the run directory
     OmegaConf.resolve(config)
+    #=====================IGNORE=====================
     missing_keys: Set[str] = OmegaConf.missing_keys(config)
     if missing_keys:
         raise ValueError(f"Got missing keys in config:\n{missing_keys}")
@@ -137,6 +141,7 @@ def main(config: DictConfig):
         free_port = get_open_port()
         print('no FSDP port specified; using open port for FSDP:', free_port)
         config.fsdp_port = free_port
+    #=====================IGNORE END=====================
 
     print(OmegaConf.to_yaml(config))
     # assert config.use_hnet != config.use_lora, 'Cannot use both Hnet and Lora at the same time, siable use_lora or use_hnet'
@@ -151,6 +156,8 @@ def main(config: DictConfig):
  
     os.environ['XDG_CACHE_HOME'] = get_local_dir(config.local_dirs)
     print('building policy')
+    #=====================IGNORE=====================
+    
     if config.use_lora:
         device_map = {'device_map': 'balanced'}
     else:
@@ -181,8 +188,30 @@ def main(config: DictConfig):
         controller.freezeParams(policy, False)
         # user_embeddings = np.load('/home/mila/e/emiliano.penaloza/direct-preference-optimization/notebooks/data/user_embeddings.npy').tolist()
         # config.user_embeddings = user_embeddings
+    #=====================IGNORE END=====================
 
 
+    elif config.train_reward: 
+        policy = transformers.AutoModelForCausalLM.from_pretrained(
+            config.model.name_or_path, cache_dir=cache_dir, low_cpu_mem_usage=True, torch_dtype=policy_dtype, device_map=None)
+        #freeze all parameters in the policy 
+        disable_dropout(policy)
+        for param in policy.parameters():
+            param.requires_grad = False
+        policy = RewardModel(policy,1,hnet_dim = config.hnet.d_emb if config.use_hnet else None)
+        print_trainable_params(policy)
+        if config.use_lora:
+            lora_config = LoraConfig(
+                            r=config.lora.r,
+                            lora_alpha=32,
+                            target_modules=config.model.target_modules,
+                            lora_dropout=0.,
+                            bias="none",
+                            task_type="CAUSAL_LM"
+                            )
+            policy = get_peft_model(policy, lora_config)
+            print('Using Lora')
+      
     else:
         policy = transformers.AutoModelForCausalLM.from_pretrained(
             config.model.name_or_path, cache_dir=cache_dir, low_cpu_mem_usage=True, torch_dtype=policy_dtype, device_map=None)
@@ -245,7 +274,8 @@ def main(config: DictConfig):
         if config.loss.name in {'dpo', 'ipo'}:
             reference_model.load_state_dict(state_dict['state'])
         print('loaded pre-trained weights')
-    
+
+    #=====================IGNORE=====================
     if 'FSDP' in config.trainer:
         world_size = torch.cuda.device_count()
         print('starting', world_size, 'processes for FSDP training')
@@ -254,6 +284,8 @@ def main(config: DictConfig):
         print(f'setting RLIMIT_NOFILE soft limit to {hard} from {soft}')
         mp.set_start_method('forkserver')
         mp.spawn(worker_main, nprocs=world_size, args=(world_size, config, policy, reference_model), join=True)
+    #=====================IGNORE END=====================
+    
     else:
         print('starting single-process worker')
 

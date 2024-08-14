@@ -5,7 +5,6 @@ import torch.nn as nn
 import transformers
 from omegaconf import DictConfig
 from accelerate import Accelerator
-
 import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -88,6 +87,43 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
     return losses, chosen_rewards, rejected_rewards
 
 
+
+
+
+
+def bradley_terry_loss(policy_chosen_logps: torch.FloatTensor,
+                       policy_rejected_logps: torch.FloatTensor,
+                       beta: float,
+                       label_smoothing: float = 0.0,
+                       ipo: bool = False) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
+    """Compute the Bradley-Terry loss for a batch of policy model log probabilities without reference model.
+
+    Args:
+        policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
+        policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
+        beta: Temperature parameter for the Bradley-Terry loss, typically something in the range of 0.1 to 0.5.
+        label_smoothing: Conservativeness for the Bradley-Terry loss, which assumes that preferences are noisy (flipped with probability label_smoothing)
+        ipo: If True, use the IPO loss instead of the Bradley-Terry loss.
+
+    Returns:
+        A tuple of three tensors: (losses, chosen_rewards, rejected_rewards).
+        The losses tensor contains the Bradley-Terry loss for each example in the batch.
+        The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
+    """
+    
+    # Compute the logit ratios for the policy model
+    policy_logit_ratios = policy_chosen_logps - policy_rejected_logps
+
+
+    losses = -F.logsigmoid(beta * policy_logit_ratios) * (1 - label_smoothing) - F.logsigmoid(-beta * policy_logit_ratios) * label_smoothing
+
+    # Compute rewards for chosen and rejected responses
+    chosen_rewards = beta * policy_chosen_logps.detach()
+    rejected_rewards = beta * policy_rejected_logps.detach()
+
+    return losses, chosen_rewards, rejected_rewards
+
+
 def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
     """Compute the log probabilities of the given labels under the given logits.
 
@@ -162,7 +198,7 @@ class BasicTrainer(object):
         self.config = config
         self.run_dir = run_dir
         self.hnet_controller =hnet_controller 
-        if self.config.use_hnet:
+        if self.config.use_hnet and not self.config.train_reward :
             self.hnet = hnet_controller.hyper_net
         tokenizer_name_or_path = config.model.tokenizer_name_or_path or config.model.name_or_path
         rank0_print(f'Loading tokenizer {tokenizer_name_or_path}')
@@ -206,7 +242,7 @@ class BasicTrainer(object):
         self.policy,self.train_iterator,self.optimizer,self.scheduler = accelerator.prepare(self.policy,self.train_iterator,self.optimizer_non_loaded,self.scheduler)
         self.reference_model = accelerator.prepare_model(self.reference_model) if self.reference_model is not None else None
         self.eval_iterator = accelerator.prepare(self.eval_iterator)
-        if self.config.use_hnet:
+        if self.config.use_hnet and not self.config.train_reward :
             self.hnet = self.policy.hnet
             self.hnet_controller.hyper_net = self.hnet
             self.policy= self.policy.policy
@@ -249,14 +285,31 @@ class BasicTrainer(object):
         
            We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
+        #THIS HAS CHOSEN AND REJECTED SPERATED AND THIS JUST CONCATENATES THEM ACROSS THE ROWS SO 2BATCH_SIZE X SEQUENCE_LENGTH X HIDEN DIM
         concatenated_batch = concatenated_inputs(batch)
+
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
         all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
+    
 
+    def reward_forward(self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+        
+           We do this to avoid doing two forward passes, because it's faster for FSDP.
+        """
+        concatenated_batch = concatenated_inputs(batch)
 
+        chosen_reward,rejected_reward = model(concatenated_batch['concatenated_input_ids'],batch['chosen_input_ids'].shape[0], attention_mask=concatenated_batch['concatenated_attention_mask'], user_emb = batch['user_emb'] if self.config.use_hnet else None)
+        chosen_reward = chosen_reward.to(torch.float32)
+        rejected_reward = rejected_reward.to(torch.float32)
+        # all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
+        # chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
+        # rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
+        return chosen_reward,rejected_reward 
+    
     def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
 
@@ -336,6 +389,75 @@ class BasicTrainer(object):
         metrics[f'loss/{train_test}'] = all_devices_losses.cpu().numpy().tolist()
 
         return losses.mean(), metrics
+
+
+    def get_batch_metrics_reward(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
+            """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
+
+            metrics = {}
+            train_test = 'train' if train else 'eval'
+
+
+
+            # if self.config.hnet.hnet_forward and self.config.use_hnet: 
+            #     if self.config.hnet.use_dummies:
+
+
+            #         layers = self.hnet(torch.ones_like(batch['user_emb']))
+            #     else:
+                    
+            #         layers = self.hnet_controller.hyper_net(batch['user_emb'])
+
+            #     self.hnet_controller.updateLayers(layers,self.first_pass)
+            #     # print(f"{sum([x.hyperAdapterA.sum().item() for x in self.hnet_controller.hypernet_layers])=}")
+            # if self.config.hnet_type == 'lora_hnet':
+            #     self.hnet_controller.updateLayers(batch['user_emb'])
+                
+            policy_chosen_reward, policy_rejected_reward = self.reward_forward(self.policy, batch)
+
+
+            if loss_config.name == 'dpo':
+                loss_kwargs = {'beta': loss_config.beta, 'reference_free': loss_config.reference_free, 'label_smoothing': loss_config.label_smoothing, 'ipo': False}
+            elif loss_config.name == 'ipo':
+                loss_kwargs = {'beta': loss_config.beta, 'ipo': True}
+            else:
+                raise ValueError(f'unknown loss {loss_config.name}')
+
+            losses, chosen_rewards, rejected_rewards = bradley_terry_loss(
+                policy_chosen_reward, policy_rejected_reward, beta=loss_config.beta)
+
+
+
+            reward_accuracies = (chosen_rewards > rejected_rewards).float()
+
+
+            chosen_rewards = self.accelerator.gather(chosen_rewards)
+
+            rejected_rewards = self.accelerator.gather(rejected_rewards)
+            reward_accuracies = self.accelerator.gather(reward_accuracies)
+
+            metrics[f'rewards_{train_test}/chosen'] = chosen_rewards.cpu().numpy().flatten().tolist()
+            metrics[f'rewards_{train_test}/rejected'] = rejected_rewards.cpu().numpy().flatten().tolist()
+            metrics[f'rewards_{train_test}/accuracies'] = reward_accuracies.cpu().numpy().flatten().tolist()
+            metrics[f'rewards_{train_test}/margins'] = (chosen_rewards - rejected_rewards).cpu().numpy().flatten().tolist()
+                # policy_rejected_logps = self.accelerator.gather(policy_rejected_logps.detach())
+                # # policy_rejected_logps = all_gather_if_needed(policy_rejected_logps.detach(), self.rank, self.world_size)
+                # metrics[f'logps_{train_test}/rejected'] = policy_rejected_logps.cpu().numpy().tolist()
+
+            # elif loss_config.name == 'sft':
+            #     policy_chosen_logits = self.policy(batch['chosen_input_ids'], attention_mask=batch['chosen_attention_mask']).logits.to(torch.float32)
+            #     policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=False)
+
+            #     losses = -policy_chosen_logps
+            # policy_chosen_logps = self.accelerator.gather(policy_chosen_logps.detach())
+            # policy_chosen_logps = all_gather_if_needed(policy_chosen_logps.detach(), self.rank, self.world_size)
+            # metrics[f'logps_{train_test}/chosen'] = policy_chosen_logps.cpu().numpy().tolist()
+            all_devices_losses = self.accelerator.gather(losses.detach())
+            # all_devices_losses = all_gather_if_needed(losses.detach(), self.rank, self.world_size)
+            metrics[f'loss/{train_test}'] = all_devices_losses.cpu().numpy().flatten().tolist()
+
+
+            return losses.mean(), metrics
 
 
 
@@ -502,6 +624,171 @@ class BasicTrainer(object):
                     rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
                 #### END TRAINING ####
             evaluate()
+
+    def train_reward_model(self):
+        """Begin either SFT or DPO training, with periodic evaluation."""
+        def evaluate():
+                self.policy.eval()
+                all_eval_metrics = defaultdict(list)
+                # if self.config.use_hnet and self.first_pass and not self.config.train_reward:
+                #     self.hnet_controller.hyper_net.eval()
+                #     self.hnet_controller.change_forward('base')
+                if self.config.sample_during_eval:
+                    all_policy_samples, all_reference_samples = [], []
+                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
+                    if self.config.loss.name in {'dpo', 'ipo'}:
+                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
+
+                
+                for eval_batch in (tqdm.tqdm(self.eval_iterator, desc='Computing eval metrics') if self.rank == 0 else self.eval_iterator):
+                    # local_eval_batch = slice_and_move_batch_for_device(eval_batch, rank, self.world_size, rank)
+                    local_eval_batch = eval_batch
+                    with torch.no_grad():
+                        _, eval_metrics = self.get_batch_metrics_reward(local_eval_batch, self.config.loss, train=False)
+
+                    for k, v in eval_metrics.items():
+                        all_eval_metrics[k].extend(v)
+
+                    if self.config.sample_during_eval:
+                        if self.config.n_eval_model_samples < self.config.eval_batch_size:
+                            rank0_print(f'Warning: n_eval_model_samples ({self.config.n_eval_model_samples}) < eval_batch_size ({self.config.eval_batch_size}). Sampling from the first complete eval batch of prompts.')
+                            sample_batches = self.eval_batches[:1]
+                        else:
+                            n_sample_batches = self.config.n_eval_model_samples // self.config.eval_batch_size
+                            sample_batches = self.eval_batches[:n_sample_batches]
+                        for eval_batch in (tqdm.tqdm(sample_batches, desc='Generating samples...') if self.rank == 0 else sample_batches):
+                            local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
+                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
+
+                            all_policy_samples.extend(policy_samples)
+                            all_reference_samples.extend(reference_samples)
+
+                            for prompt, sample in zip(eval_batch['prompt'], policy_samples):
+                                policy_text_table.add_data(self.example_counter, prompt, sample)
+                            if self.config.loss.name in {'dpo', 'ipo'}:
+                                for prompt, sample in zip(eval_batch['prompt'], reference_samples):
+                                    reference_text_table.add_data(self.example_counter, prompt, sample)
+
+                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
+                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
+                if self.config.sample_during_eval:
+                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
+                    if self.config.loss.name in {'dpo', 'ipo'}:
+                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
+
+                if self.config.wandb.enabled and self.rank == 0:
+                    wandb.log(mean_eval_metrics, step=self.example_counter)
+
+                    if self.config.sample_during_eval:
+                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
+                        if self.config.loss.name in {'dpo', 'ipo'}:
+                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
+
+                if self.example_counter > 0:
+                    if self.config.debug:
+                        rank0_print('skipping save in debug mode')
+                    else:
+                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
+                        rank0_print(f'creating checkpoint to write to {output_dir}...')
+                        if self.config.save:
+                            self.save(output_dir, mean_eval_metrics)
+
+
+        rank0_print(f'Using {self.config.optimizer} optimizer')
+        
+        
+        # rank = self.accelerator.device
+
+            
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
+        random.seed(self.seed)
+
+        if self.config.loss.name in {'dpo', 'ipo'}:
+            self.reference_model.eval()
+
+        self.example_counter = 0
+        self.batch_counter = 0
+        last_log = None
+
+        for e in range(self.config.n_epochs):
+            evaluate()
+            for batch in self.train_iterator:
+                #### BEGIN EVALUATION ####
+                if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
+                    rank0_print("="*50)
+                    rank0_print("="*50)
+                    rank0_print(f'Running evaluation after {self.example_counter} train examples')
+                    rank0_print("="*50)
+                    rank0_print("="*50)
+                    
+                    
+                #### END EVALUATION ####
+
+                #### BEGIN TRAINING ####
+                # if self.config.use_hnet or self.config.use_lora:
+                # if self.config.use_hnet :
+                #     self.hnet_controller.change_forward('adaptor')
+                #     self.hnet_controller.hyper_net.train()
+                #     if self.config.hnet.hnet_forward:
+                #         self.policy.eval()
+                #     else:
+                #         self.policy.train()
+                # else:
+                self.policy.train()
+                #print trainable parameters 
+                
+                
+                start_time = time.time()
+                batch_metrics = defaultdict(list)
+                for microbatch_idx in range(self.config.gradient_accumulation_steps):
+                    # global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, rank)
+                    # local_microbatch = slice_and_move_batch_for_device(global_microbatch, rank, self.world_size, rank)
+
+                    loss, metrics = self.get_batch_metrics_reward(batch, self.config.loss, train=True)
+                    self.first_pass = False
+                    l = (loss / self.config.gradient_accumulation_steps)
+                    self.accelerator.backward(l)
+
+
+                    for k, v in metrics.items():
+                        batch_metrics[k].extend(v)
+
+                grad_norm = self.clip_gradient()
+
+                self.optimizer.step()
+                self.scheduler.step()
+
+                # print(f"{list(self.hnet_controller.hyper_net.transformer_encoder.parameters())[0]=}")
+
+                self.optimizer.zero_grad()
+
+                step_time = time.time() - start_time
+                examples_per_second = self.config.batch_size / step_time
+                batch_metrics['examples_per_second'].append(examples_per_second)
+                batch_metrics['grad_norm'].append(grad_norm)
+
+                self.batch_counter += 1
+                self.example_counter += self.config.batch_size
+
+                if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
+                    mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
+
+                    mean_train_metrics['counters/examples'] = self.example_counter
+                    mean_train_metrics['counters/updates'] = self.batch_counter
+                    #gather mean_train_metrics
+                    # mean_train_metrics = self.accelerator.gather(mean_train_metrics)
+                    rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
+
+                    if self.config.wandb.enabled and self.rank == 0:
+                        wandb.log(mean_train_metrics, step=self.example_counter)
+
+                    last_log = time.time()
+                else:
+                    rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
+                #### END TRAINING ####
+            evaluate()
+
 
 
     def clip_gradient(self):

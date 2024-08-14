@@ -24,6 +24,7 @@ use_lora : False
 
 use_hnet : True
 
+train_reward: false
 
 # wandb configuration
 wandb:
