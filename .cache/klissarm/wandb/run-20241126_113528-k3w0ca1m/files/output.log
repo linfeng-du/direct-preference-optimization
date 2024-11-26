@@ -1,4 +1,0 @@
-Creating trainer on process 0 with world size 1
-> /home/mila/k/klissarm/direct-preference-optimization/trainers.py(202)__init__()
--> if self.config.use_hnet and not self.config.train_reward :
-(Pdb)
