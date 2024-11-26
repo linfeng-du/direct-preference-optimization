@@ -22,7 +22,7 @@ datasets:
 
 use_lora : False
 
-use_hnet : True
+use_hnet : False
 
 train_reward: false
 
@@ -81,8 +81,8 @@ n_examples: null
 n_eval_examples: 256
 
 # the trainer class to use (e.g. BasicTrainer, FSDPTrainer, TensorParallelTrainer)
-trainer: FSDPHnetTrainer
-# trainer: FSDPTrainer
+# trainer: FSDPHnetTrainer
+trainer: BasicTrainer
 
 # The optimizer to use; we use RMSprop because it works about as well as Adam and is more memory-efficient
 optimizer: AdamW
@@ -103,7 +103,8 @@ save: False
 
 hnet_type : hypernet
 
-
+# the location of an already downlaoded dataset
+cache_dir: null
 
 defaults:
 - _self_

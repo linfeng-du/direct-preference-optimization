@@ -14,17 +14,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 import torch.nn as nn 
 #if the directory is not the root of the project, change it
-os.chdir('/home/mila/e/emiliano.penaloza/RLPHF')
+# os.chdir('/home/mila/e/emiliano.penaloza/RLPHF')
 from datasets import load_dataset
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import regex as re
-os.environ['TRANSFORMERS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['HF_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['HF_DATASETS_CACHE'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-os.environ['TORCH_HOME'] = '/home/mila/e/emiliano.penaloza/scratch/models'
-cache_dir = '/home/mila/e/emiliano.penaloza/scratch/models'
 
+
+scratch_dir = os.getenv('SCRATCH')
+os.environ['TRANSFORMERS_CACHE'] = f'{scratch_dir}/models'
+os.environ['HF_HOME'] = f'{scratch_dir}/models'
+os.environ['HF_DATASETS_CACHE'] = f'{scratch_dir}/models'
+os.environ['TORCH_HOME'] = f'{scratch_dir}/models'
+cache_dir = f'{scratch_dir}/models'
 
 
 class LoRAHnet_controller():

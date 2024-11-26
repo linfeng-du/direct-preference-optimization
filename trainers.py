@@ -197,7 +197,8 @@ class BasicTrainer(object):
         self.world_size = world_size
         self.config = config
         self.run_dir = run_dir
-        self.hnet_controller =hnet_controller 
+        self.hnet_controller = hnet_controller 
+
         if self.config.use_hnet and not self.config.train_reward :
             self.hnet = hnet_controller.hyper_net
         tokenizer_name_or_path = config.model.tokenizer_name_or_path or config.model.name_or_path
@@ -221,11 +222,11 @@ class BasicTrainer(object):
         self.accelerator = accelerator
         rank0_print(f'Loaded train data iterator')
         
-        self.train_dataset = RLHFDataset(**data_iterator_kwargs, split='train',n_examples=config.n_examples,n_epochs=config.n_epochs)
+        self.train_dataset = RLHFDataset(**data_iterator_kwargs, split='train',n_examples=config.n_examples,n_epochs=config.n_epochs, cache_dir=config.cache_dir)
         self.train_iterator = torch.utils.data.DataLoader(self.train_dataset, batch_size=config.batch_size, num_workers=0, collate_fn=self.train_dataset.collate_fn, shuffle=True)
         # self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
         
-        self.eval_dataset = RLHFDataset(**data_iterator_kwargs, split='test',n_examples=config.n_eval_examples)
+        self.eval_dataset = RLHFDataset(**data_iterator_kwargs, split='test',n_examples=config.n_eval_examples, cache_dir=config.cache_dir)
         self.eval_iterator = torch.utils.data.DataLoader(self.eval_dataset, batch_size=config.eval_batch_size, num_workers=0, collate_fn=self.eval_dataset.collate_fn, shuffle=False)
 
         # self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
@@ -843,7 +844,6 @@ class FSDPTrainer(BasicTrainer):
            This trainer will shard both the policy and reference model across all available GPUs.
            Models are sharded at the block level, where the block class name is provided in the config.
         """
-
         super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
         assert config.model.block_name is not None, 'must specify model.block_name (e.g., GPT2Block or GPTNeoXLayer) for FSDP'
 

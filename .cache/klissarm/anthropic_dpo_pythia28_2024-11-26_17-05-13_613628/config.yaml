@@ -1,0 +1,65 @@
+seed: 0
+exp_name: anthropic_dpo_pythia28
+batch_size: 64
+eval_batch_size: 32
+debug: false
+fsdp_port: null
+datasets:
+- persona
+use_lora: false
+use_hnet: false
+train_reward: false
+wandb:
+  enabled: true
+  entity: null
+  project: direct-preference-optimization
+local_dirs:
+- /scr-ssd
+- /scr
+- .cache
+sample_during_eval: false
+n_eval_model_samples: 0
+do_first_eval: true
+local_run_dir: .cache/klissarm/anthropic_dpo_pythia28_2024-11-26_17-05-13_613628
+lr: 0.05
+gradient_accumulation_steps: 2
+max_grad_norm: 10.0
+max_length: 512
+max_prompt_length: 256
+n_epochs: 1
+n_examples: null
+n_eval_examples: 256
+trainer: BasicTrainer
+optimizer: AdamW
+warmup_steps: 150
+activation_checkpointing: false
+eval_every: 4928
+minimum_log_interval_secs: 0.0
+save: false
+hnet_type: hypernet
+cache_dir: null
+model:
+  name_or_path: EleutherAI/pythia-2.8b
+  tokenizer_name_or_path: null
+  archive: null
+  block_name: GPTNeoXLayer
+  policy_dtype: float32
+  fsdp_policy_mp: bfloat16
+  reference_dtype: float16
+loss:
+  name: sft
+hnet:
+  d_a: 16
+  alpha: 16
+  d_A: 256
+  n_transformer_heads: 4
+  n_transformer_layers: 8
+  d_emb: 188
+  d_hnet: 128
+  dropout: 0.0
+  use_dummies: true
+  hnet_forward: true
+  d_model: null
+  n_layers: null
+lora:
+  r: 16

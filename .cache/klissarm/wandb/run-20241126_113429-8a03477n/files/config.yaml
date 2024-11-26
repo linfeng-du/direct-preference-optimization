@@ -1,0 +1,145 @@
+_wandb:
+    value:
+        cli_version: 0.18.7
+        code_path: code/train.py
+        m: []
+        python_version: 3.10.11
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 50
+                - 51
+                - 53
+                - 55
+                - 71
+                - 98
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 50
+                - 51
+                - 53
+                - 55
+                - 71
+                - 98
+            "3":
+                - 13
+                - 16
+                - 23
+                - 55
+            "4": 3.10.11
+            "5": 0.18.7
+            "6": 4.46.3
+            "8":
+                - 2
+                - 5
+                - 9
+            "12": 0.18.7
+            "13": linux-x86_64
+activation_checkpointing:
+    value: false
+batch_size:
+    value: 64
+datasets:
+    value:
+        - hh
+debug:
+    value: false
+do_first_eval:
+    value: true
+eval_batch_size:
+    value: 32
+eval_every:
+    value: 4928
+exp_name:
+    value: anthropic_dpo_pythia28
+fsdp_port:
+    value: 47739
+gradient_accumulation_steps:
+    value: 2
+hnet:
+    value:
+        alpha: 16
+        d_A: 256
+        d_a: 16
+        d_emb: 188
+        d_hnet: 128
+        d_model: null
+        dropout: 0
+        hnet_forward: true
+        n_layers: null
+        n_transformer_heads: 4
+        n_transformer_layers: 8
+        use_dummies: true
+hnet_type:
+    value: hypernet
+local_dirs:
+    value:
+        - /scr-ssd
+        - /scr
+        - .cache
+local_run_dir:
+    value: .cache/klissarm/anthropic_dpo_pythia28_2024-11-26_11-34-15_848981
+lora:
+    value:
+        r: 16
+loss:
+    value:
+        name: sft
+lr:
+    value: 0.05
+max_grad_norm:
+    value: 10
+max_length:
+    value: 512
+max_prompt_length:
+    value: 256
+minimum_log_interval_secs:
+    value: 0
+model:
+    value:
+        archive: null
+        block_name: GPTNeoXLayer
+        fsdp_policy_mp: bfloat16
+        name_or_path: EleutherAI/pythia-2.8b
+        policy_dtype: float32
+        reference_dtype: float16
+        tokenizer_name_or_path: null
+n_epochs:
+    value: 1
+n_eval_examples:
+    value: 256
+n_eval_model_samples:
+    value: 0
+n_examples:
+    value: null
+optimizer:
+    value: AdamW
+sample_during_eval:
+    value: false
+save:
+    value: false
+seed:
+    value: 0
+train_reward:
+    value: false
+trainer:
+    value: FSDPTrainer
+use_hnet:
+    value: false
+use_lora:
+    value: false
+wandb:
+    value:
+        enabled: true
+        entity: null
+        project: direct-preference-optimization
+warmup_steps:
+    value: 150

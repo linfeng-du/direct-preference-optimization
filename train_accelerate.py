@@ -24,11 +24,13 @@ from hnet.hypernet import HyperNetController, HyperNet, HyperNetLinear,PolicyWra
 from accelerate import Accelerator
 
 
-os.environ['TRANSFORMERS_CACHE'] = '../scratch/models'
-os.environ['HF_HOME'] = '../scratch/models'
-os.environ['HF_DATASETS_CACHE'] = '../scratch/models'
-os.environ['TORCH_HOME'] = '../scratch/models'
-cache_dir = '../scratch/models'
+scratch_dir = os.getenv('SCRATCH')
+os.environ['TRANSFORMERS_CACHE'] = f'{scratch_dir}/models'
+os.environ['HF_HOME'] = f'{scratch_dir}/models'
+os.environ['HF_DATASETS_CACHE'] = f'{scratch_dir}/models'
+os.environ['TORCH_HOME'] = f'{scratch_dir}/models'
+cache_dir = f'{scratch_dir}/models'
+
 
 def print_trainable_params(model):
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -103,7 +105,7 @@ def worker_main(accelerator,rank: int, world_size: int, config: DictConfig, poli
     TrainerClass = getattr(trainers, config.trainer)
 
     print(f'Creating trainer on process {rank} with world size {world_size}')
-    trainer = TrainerClass(accelerator,policy, config, config.seed, config.local_run_dir, reference_model=reference_model, rank=rank, world_size=world_size,hnet_controller = controller)
+    trainer = TrainerClass(accelerator, policy, config, config.seed, config.local_run_dir, reference_model=reference_model, rank=rank, world_size=world_size,hnet_controller = controller)
     # if config.use_lora:
     #     controller.augmentLLM(trainer.policy)
     #     controller.freezeParams(trainer.policy, False)
