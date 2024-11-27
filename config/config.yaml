@@ -10,9 +10,6 @@ batch_size : 32
 # the batch size during evaluation and sampling, if enabled
 eval_batch_size: 64
 
-# debug mode (disables wandb, model checkpointing, etc.)
-debug: false
-
 # the port to use for FSDP
 fsdp_port: null
 
@@ -23,8 +20,6 @@ datasets:
 use_lora : False
 
 use_hnet : False
-
-train_reward: false
 
 # wandb configuration
 wandb:
@@ -80,7 +75,7 @@ n_examples: null
 # the number of examples to evaluate on (and sample from, if sample_during_eval is true)
 n_eval_examples: 256
 
-# the trainer class to use (e.g. BasicTrainer, FSDPTrainer, TensorParallelTrainer)
+# the trainer class to use (e.g. BasicTrainer, FSDPTrainer)
 # trainer: FSDPHnetTrainer
 trainer: BasicTrainer
 

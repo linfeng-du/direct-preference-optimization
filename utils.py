@@ -1,15 +1,16 @@
 import os
-import getpass
-from datetime import datetime
-import torch
 import random
-import numpy as np
-import torch.distributed as dist
+import socket
+import getpass
 import inspect
 import importlib.util
-import socket
-import os
+from datetime import datetime
 from typing import Dict, Union, Type, List
+
+import numpy as np
+
+import torch
+import torch.distributed as dist
 
 
 def get_open_port():
@@ -72,7 +73,6 @@ def slice_and_move_batch_for_device(batch: Dict, rank: int, world_size: int, dev
     sliced = {k: v[start:end] for k, v in batch.items()}
     on_device = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in sliced.items()}
     return on_device
-
 
 
 def pad_to_length(tensor: torch.Tensor, length: int, pad_value: Union[int, float], dim: int = -1) -> torch.Tensor:

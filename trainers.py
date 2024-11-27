@@ -1,10 +1,21 @@
+import os
+import time
+import json
+import random
+import functools
+import contextlib
+from collections import defaultdict
+from typing import Optional, Dict, List, Union, Tuple
+
+import tqdm
+import wandb
+from omegaconf import DictConfig
+import numpy as np
+
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 import torch.nn.functional as F
 import torch.nn as nn
-import transformers
-from omegaconf import DictConfig
-from accelerate import Accelerator
 import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -16,30 +27,19 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.fsdp.api import FullStateDictConfig, FullOptimStateDictConfig
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy,size_based_auto_wrap_policy
-import tensor_parallel as tp
-import contextlib 
+import transformers
 
-from preference_datasets import get_batch_iterator,RLHFDataset
+from accelerate import Accelerator
+
+from preference_datasets import RLHFDataset
 from utils import (
     slice_and_move_batch_for_device,
     formatted_dict,
-    all_gather_if_needed,
     pad_to_length,
     get_block_class_from_model,
     rank0_print,
     get_local_dir,
 )
-import numpy as np
-import wandb
-import tqdm
-
-import random
-import os
-from collections import defaultdict
-import time
-import json
-import functools
-from typing import Optional, Dict, List, Union, Tuple
 
 
 def preference_loss(policy_chosen_logps: torch.FloatTensor,
@@ -85,10 +85,6 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
 
     return losses, chosen_rewards, rejected_rewards
-
-
-
-
 
 
 def bradley_terry_loss(policy_chosen_logps: torch.FloatTensor,
@@ -294,23 +290,7 @@ class BasicTrainer(object):
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
-    
 
-    def reward_forward(self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
-        
-           We do this to avoid doing two forward passes, because it's faster for FSDP.
-        """
-        concatenated_batch = concatenated_inputs(batch)
-
-        chosen_reward,rejected_reward = model(concatenated_batch['concatenated_input_ids'],batch['chosen_input_ids'].shape[0], attention_mask=concatenated_batch['concatenated_attention_mask'], user_emb = batch['user_emb'] if self.config.use_hnet else None)
-        chosen_reward = chosen_reward.to(torch.float32)
-        rejected_reward = rejected_reward.to(torch.float32)
-        # all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
-        # chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
-        # rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
-        return chosen_reward,rejected_reward 
-    
     def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
 
@@ -390,77 +370,6 @@ class BasicTrainer(object):
         metrics[f'loss/{train_test}'] = all_devices_losses.cpu().numpy().tolist()
 
         return losses.mean(), metrics
-
-
-    def get_batch_metrics_reward(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
-            """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
-
-            metrics = {}
-            train_test = 'train' if train else 'eval'
-
-
-
-            # if self.config.hnet.hnet_forward and self.config.use_hnet: 
-            #     if self.config.hnet.use_dummies:
-
-
-            #         layers = self.hnet(torch.ones_like(batch['user_emb']))
-            #     else:
-                    
-            #         layers = self.hnet_controller.hyper_net(batch['user_emb'])
-
-            #     self.hnet_controller.updateLayers(layers,self.first_pass)
-            #     # print(f"{sum([x.hyperAdapterA.sum().item() for x in self.hnet_controller.hypernet_layers])=}")
-            # if self.config.hnet_type == 'lora_hnet':
-            #     self.hnet_controller.updateLayers(batch['user_emb'])
-                
-            policy_chosen_reward, policy_rejected_reward = self.reward_forward(self.policy, batch)
-
-
-            if loss_config.name == 'dpo':
-                loss_kwargs = {'beta': loss_config.beta, 'reference_free': loss_config.reference_free, 'label_smoothing': loss_config.label_smoothing, 'ipo': False}
-            elif loss_config.name == 'ipo':
-                loss_kwargs = {'beta': loss_config.beta, 'ipo': True}
-            else:
-                raise ValueError(f'unknown loss {loss_config.name}')
-
-            losses, chosen_rewards, rejected_rewards = bradley_terry_loss(
-                policy_chosen_reward, policy_rejected_reward, beta=loss_config.beta)
-
-
-
-            reward_accuracies = (chosen_rewards > rejected_rewards).float()
-
-
-            chosen_rewards = self.accelerator.gather(chosen_rewards)
-
-            rejected_rewards = self.accelerator.gather(rejected_rewards)
-            reward_accuracies = self.accelerator.gather(reward_accuracies)
-
-            metrics[f'rewards_{train_test}/chosen'] = chosen_rewards.cpu().numpy().flatten().tolist()
-            metrics[f'rewards_{train_test}/rejected'] = rejected_rewards.cpu().numpy().flatten().tolist()
-            metrics[f'rewards_{train_test}/accuracies'] = reward_accuracies.cpu().numpy().flatten().tolist()
-            metrics[f'rewards_{train_test}/margins'] = (chosen_rewards - rejected_rewards).cpu().numpy().flatten().tolist()
-                # policy_rejected_logps = self.accelerator.gather(policy_rejected_logps.detach())
-                # # policy_rejected_logps = all_gather_if_needed(policy_rejected_logps.detach(), self.rank, self.world_size)
-                # metrics[f'logps_{train_test}/rejected'] = policy_rejected_logps.cpu().numpy().tolist()
-
-            # elif loss_config.name == 'sft':
-            #     policy_chosen_logits = self.policy(batch['chosen_input_ids'], attention_mask=batch['chosen_attention_mask']).logits.to(torch.float32)
-            #     policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=False)
-
-            #     losses = -policy_chosen_logps
-            # policy_chosen_logps = self.accelerator.gather(policy_chosen_logps.detach())
-            # policy_chosen_logps = all_gather_if_needed(policy_chosen_logps.detach(), self.rank, self.world_size)
-            # metrics[f'logps_{train_test}/chosen'] = policy_chosen_logps.cpu().numpy().tolist()
-            all_devices_losses = self.accelerator.gather(losses.detach())
-            # all_devices_losses = all_gather_if_needed(losses.detach(), self.rank, self.world_size)
-            metrics[f'loss/{train_test}'] = all_devices_losses.cpu().numpy().flatten().tolist()
-
-
-            return losses.mean(), metrics
-
-
 
     def train(self):
         """Begin either SFT or DPO training, with periodic evaluation."""
@@ -626,172 +535,6 @@ class BasicTrainer(object):
                 #### END TRAINING ####
             evaluate()
 
-    def train_reward_model(self):
-        """Begin either SFT or DPO training, with periodic evaluation."""
-        def evaluate():
-                self.policy.eval()
-                all_eval_metrics = defaultdict(list)
-                # if self.config.use_hnet and self.first_pass and not self.config.train_reward:
-                #     self.hnet_controller.hyper_net.eval()
-                #     self.hnet_controller.change_forward('base')
-                if self.config.sample_during_eval:
-                    all_policy_samples, all_reference_samples = [], []
-                    policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name in {'dpo', 'ipo'}:
-                        reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-
-                
-                for eval_batch in (tqdm.tqdm(self.eval_iterator, desc='Computing eval metrics') if self.rank == 0 else self.eval_iterator):
-                    # local_eval_batch = slice_and_move_batch_for_device(eval_batch, rank, self.world_size, rank)
-                    local_eval_batch = eval_batch
-                    with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics_reward(local_eval_batch, self.config.loss, train=False)
-
-                    for k, v in eval_metrics.items():
-                        all_eval_metrics[k].extend(v)
-
-                    if self.config.sample_during_eval:
-                        if self.config.n_eval_model_samples < self.config.eval_batch_size:
-                            rank0_print(f'Warning: n_eval_model_samples ({self.config.n_eval_model_samples}) < eval_batch_size ({self.config.eval_batch_size}). Sampling from the first complete eval batch of prompts.')
-                            sample_batches = self.eval_batches[:1]
-                        else:
-                            n_sample_batches = self.config.n_eval_model_samples // self.config.eval_batch_size
-                            sample_batches = self.eval_batches[:n_sample_batches]
-                        for eval_batch in (tqdm.tqdm(sample_batches, desc='Generating samples...') if self.rank == 0 else sample_batches):
-                            local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
-                            policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
-
-                            all_policy_samples.extend(policy_samples)
-                            all_reference_samples.extend(reference_samples)
-
-                            for prompt, sample in zip(eval_batch['prompt'], policy_samples):
-                                policy_text_table.add_data(self.example_counter, prompt, sample)
-                            if self.config.loss.name in {'dpo', 'ipo'}:
-                                for prompt, sample in zip(eval_batch['prompt'], reference_samples):
-                                    reference_text_table.add_data(self.example_counter, prompt, sample)
-
-                mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
-                if self.config.sample_during_eval:
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.config.loss.name in {'dpo', 'ipo'}:
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
-
-                if self.config.wandb.enabled and self.rank == 0:
-                    wandb.log(mean_eval_metrics, step=self.example_counter)
-
-                    if self.config.sample_during_eval:
-                        wandb.log({"policy_samples": policy_text_table}, step=self.example_counter)
-                        if self.config.loss.name in {'dpo', 'ipo'}:
-                            wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
-
-                if self.example_counter > 0:
-                    if self.config.debug:
-                        rank0_print('skipping save in debug mode')
-                    else:
-                        output_dir = os.path.join(self.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
-                        if self.config.save:
-                            self.save(output_dir, mean_eval_metrics)
-
-
-        rank0_print(f'Using {self.config.optimizer} optimizer')
-        
-        
-        # rank = self.accelerator.device
-
-            
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
-        random.seed(self.seed)
-
-        if self.config.loss.name in {'dpo', 'ipo'}:
-            self.reference_model.eval()
-
-        self.example_counter = 0
-        self.batch_counter = 0
-        last_log = None
-
-        for e in range(self.config.n_epochs):
-            evaluate()
-            for batch in self.train_iterator:
-                #### BEGIN EVALUATION ####
-                if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                    rank0_print("="*50)
-                    rank0_print("="*50)
-                    rank0_print(f'Running evaluation after {self.example_counter} train examples')
-                    rank0_print("="*50)
-                    rank0_print("="*50)
-                    
-                    
-                #### END EVALUATION ####
-
-                #### BEGIN TRAINING ####
-                # if self.config.use_hnet or self.config.use_lora:
-                # if self.config.use_hnet :
-                #     self.hnet_controller.change_forward('adaptor')
-                #     self.hnet_controller.hyper_net.train()
-                #     if self.config.hnet.hnet_forward:
-                #         self.policy.eval()
-                #     else:
-                #         self.policy.train()
-                # else:
-                self.policy.train()
-                #print trainable parameters 
-                
-                
-                start_time = time.time()
-                batch_metrics = defaultdict(list)
-                for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                    # global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, rank)
-                    # local_microbatch = slice_and_move_batch_for_device(global_microbatch, rank, self.world_size, rank)
-
-                    loss, metrics = self.get_batch_metrics_reward(batch, self.config.loss, train=True)
-                    self.first_pass = False
-                    l = (loss / self.config.gradient_accumulation_steps)
-                    self.accelerator.backward(l)
-
-
-                    for k, v in metrics.items():
-                        batch_metrics[k].extend(v)
-
-                grad_norm = self.clip_gradient()
-
-                self.optimizer.step()
-                self.scheduler.step()
-
-                # print(f"{list(self.hnet_controller.hyper_net.transformer_encoder.parameters())[0]=}")
-
-                self.optimizer.zero_grad()
-
-                step_time = time.time() - start_time
-                examples_per_second = self.config.batch_size / step_time
-                batch_metrics['examples_per_second'].append(examples_per_second)
-                batch_metrics['grad_norm'].append(grad_norm)
-
-                self.batch_counter += 1
-                self.example_counter += self.config.batch_size
-
-                if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                    mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-
-                    mean_train_metrics['counters/examples'] = self.example_counter
-                    mean_train_metrics['counters/updates'] = self.batch_counter
-                    #gather mean_train_metrics
-                    # mean_train_metrics = self.accelerator.gather(mean_train_metrics)
-                    rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                    if self.config.wandb.enabled and self.rank == 0:
-                        wandb.log(mean_train_metrics, step=self.example_counter)
-
-                    last_log = time.time()
-                else:
-                    rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-                #### END TRAINING ####
-            evaluate()
-
-
-
     def clip_gradient(self):
         """Clip the gradient norm of the parameters of a non-FSDP policy."""
         return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
@@ -823,18 +566,6 @@ class BasicTrainer(object):
 
         scheduler_state_dict = self.scheduler.state_dict()
         self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
-
-
-class HnetTRainer(BasicTrainer):
-    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1,hnet_controller = None):
-        """A trainer subclass that uses a hypernetwork to generate the policy model.
-        
-           The hypernetwork is a separate model that generates the weights of the policy model.
-        """
-        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
-        self.hnet_controller = hnet_controller
-        
-
 
 
 class FSDPTrainer(BasicTrainer):
@@ -928,32 +659,8 @@ class FSDPTrainer(BasicTrainer):
             scheduler_state_dict = self.scheduler.state_dict()
             self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
         dist.barrier()
-        
 
-class TensorParallelTrainer(BasicTrainer):
-    def __init__(self, policy, config, seed, run_dir, reference_model=None, rank=0, world_size=1):
-        """A trainer subclass that uses TensorParallel to shard the model across multiple GPUs.
 
-           Based on https://github.com/BlackSamorez/tensor_parallel. Note sampling is extremely slow,
-              see https://github.com/BlackSamorez/tensor_parallel/issues/66.
-        """
-        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
-        
-        rank0_print('Sharding policy...')
-        self.policy = tp.tensor_parallel(policy, sharded=True)
-        if config.loss.name in {'dpo', 'ipo'}:
-            rank0_print('Sharding reference model...')
-            self.reference_model = tp.tensor_parallel(reference_model, sharded=False)
-
-    def save(self, output_dir=None, metrics=None):
-        """Save (unsharded) policy state to disk."""
-        with tp.save_tensor_parallel(self.policy):
-            policy_state_dict = self.policy.state_dict()
-    
-        self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
-        del policy_state_dict
-        
-        
 class FSDPHnetTrainer(FSDPTrainer):
     def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1, hnet_controller = None):
         """A trainer subclass that uses PyTorch FSDP to shard the hypernetwork and policy model across multiple GPUs.
@@ -1014,70 +721,3 @@ class FSDPHnetTrainer(FSDPTrainer):
             scheduler_state_dict = self.scheduler.state_dict()
             self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
         dist.barrier()
-
-        
-        
-
-
-
-class TensorParallelTrainer(BasicTrainer):
-    def __init__(self, policy, config, seed, run_dir, reference_model=None, rank=0, world_size=1,hnet_controller=None ):
-        """A trainer subclass that uses TensorParallel to shard the model across multiple GPUs.
-
-           Based on https://github.com/BlackSamorez/tensor_parallel. Note sampling is extremely slow,
-              see https://github.com/BlackSamorez/tensor_parallel/issues/66.
-        """
-        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
-        self.hnet_controller = hnet_controller
-        rank0_print('Sharding policy...')
-        self.policy = tp.tensor_parallel(policy, sharded=True)
-        if config.loss.name in {'dpo', 'ipo'}:
-            rank0_print('Sharding reference model...')
-            self.reference_model = tp.tensor_parallel(reference_model, sharded=False)
-
-    def save(self, output_dir=None, metrics=None):
-        """Save (unsharded) policy state to disk."""
-        with tp.save_tensor_parallel(self.policy):
-            policy_state_dict = self.policy.state_dict()
-    
-        self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
-        del policy_state_dict
-     
-        
-class FSDPLoRATrainer(FSDPTrainer):
-    def __init__(self, policy: nn.Module, config: DictConfig, seed: int, run_dir: str, reference_model: Optional[nn.Module] = None, rank: int = 0, world_size: int = 1, hnet_controller = None):
-        """A trainer subclass that uses PyTorch FSDP to shard the hypernetwork and policy model across multiple GPUs.
-        
-           This trainer will shard both the policy and hypernetwork across all available GPUs.
-           Models are sharded at the block level, where the block class name is provided in the config.
-        """
-        super().__init__(policy, config, seed, run_dir, reference_model, rank, world_size)
-        self.hnet_controller = hnet_controller
-        
-    def save(self, output_dir=None, metrics=None):
-        """Save policy, optimizer, and scheduler state to disk, gathering from all processes and saving only on the rank 0 process."""
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, state_dict_config=save_policy):
-            policy_state_dict = self.policy.state_dict()
-
-        if self.rank == 0:
-            self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
-        del policy_state_dict
-        dist.barrier()
-
-        save_policy = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, optim_state_dict_config=save_policy):
-            optimizer_state_dict = FSDP.optim_state_dict(self.policy, self.optimizer)
-
-        if self.rank == 0:
-            self.write_state_dict(self.example_counter, optimizer_state_dict, metrics, 'optimizer.pt', output_dir)
-        del optimizer_state_dict
-        dist.barrier()
-
-        if self.rank == 0:
-            scheduler_state_dict = self.scheduler.state_dict()
-            self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
-        dist.barrier()
-
-        
-        

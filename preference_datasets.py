@@ -1,18 +1,21 @@
 import os 
-import pickle
 import json
-import pandas as pd
-import datasets
-import torch
-from torch.utils.data import DataLoader, Dataset
-from utils import get_local_dir, TemporarilySeededRandom
-from torch.nn.utils.rnn import pad_sequence
-from collections import defaultdict
-import tqdm
+import pickle
 import random
-from bs4 import BeautifulSoup, NavigableString
-import numpy as np
+from collections import defaultdict
 from typing import Dict, List, Optional, Iterator, Callable, Union, Tuple
+
+import tqdm
+import numpy as np
+import pandas as pd
+from bs4 import BeautifulSoup, NavigableString
+
+import torch
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+import datasets
+
+from utils import TemporarilySeededRandom
 
 
 def extract_anthropic_prompt(prompt_and_response):
@@ -85,6 +88,8 @@ def get_se(split, silent=False, cache_dir: str = None) -> Dict[str, Dict[str, Un
         data[prompt]['sft_target'] = max(responses, key=lambda x: scores[responses.index(x)])
 
     return data
+
+
 def preprocess_prism(split= 'train'):
         #load json data /home/mila/e/emiliano.penaloza/RLPHF/notebooks/data/train_data.json
 
@@ -187,6 +192,7 @@ def get_prsim(split: str, silent: bool = False, cache_dir: str = None) -> Dict[s
         data[prompt]['sft_target'].append('')
     return data
 
+
 def get_shp(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
     """Load the Stanford Human Preferences dataset from Huggingface and convert it to the necessary format. See hh for the format.
 
@@ -268,6 +274,7 @@ def get_hh(split: str, silent: bool = False, cache_dir: str = None) -> Dict[str,
 
     return data
 
+
 def get_persona(
     split: str, 
     silent: bool = False, 
@@ -324,6 +331,7 @@ def get_persona(
         data[prompt]['persona'].append(persona)
 
     return data
+
 
 def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None):
     print(f"{name=}")
@@ -494,6 +502,7 @@ class RLHFDataset(Dataset):
 
 
         return get_collate_fn(self.tokenizer)(batch)
+
 
 def get_batch_iterator(names: List[str],
                        tokenizer,

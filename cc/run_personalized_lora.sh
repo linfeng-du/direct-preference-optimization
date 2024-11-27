@@ -1,4 +1,4 @@
-accelerate launch train_accelerate.py\
+accelerate launch train.py\
  model=gpt-2-instruct\
  trainer=BasicTrainer\
  hnet=lora_hnet\
