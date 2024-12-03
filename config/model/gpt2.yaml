@@ -1,0 +1,7 @@
+name: gpt2
+archive: null
+
+policy_dtype: float32
+reference_dtype: float16
+
+target_modules: ['c_attn']
