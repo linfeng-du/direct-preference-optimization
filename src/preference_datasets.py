@@ -94,19 +94,28 @@ class PreferenceSampler(Sampler):
             self,
             dataset: PreferenceDataset,
             shuffle: bool,
-            seed: int,
-            n_epochs: int | None = None,
-            n_examples: int | None = None
+            seed: int | None = None,
+            n_epochs: int = -1,
+            n_examples: int = -1
         ) -> None:
-        assert n_epochs is not None or n_examples is not None, \
+        assert n_epochs > 0 or n_examples > 0, \
                'Must specify either n_epochs or n_examples'
 
-        self.split = dataset.split
-        self.grouped_indices = dataset.grouped_indices
         self.shuffle = shuffle
         self.n_epochs = n_epochs
         self.n_examples = n_examples
         self.seed = seed
+
+        self.split = dataset.split
+        self.grouped_indices = dataset.grouped_indices[:]
+
+        epoch_examples = self.n_epochs * len(dataset)
+        if self.n_epochs == -1:
+            self.sampler_len = self.n_examples
+        elif self.n_examples == -1:
+            self.sampler_len = epoch_examples
+        else:
+            self.sampler_len = min(self.n_examples, epoch_examples)
 
         self.epoch_idx = 0
         self.example_idx = 0
@@ -123,16 +132,19 @@ class PreferenceSampler(Sampler):
                     yield index
 
                     self.example_idx += 1
-                    if self.n_examples is not None and self.example_idx == self.n_examples:
+                    if self.example_idx == self.n_examples:
                         log_main_process(f'Finished generating {self.n_examples} examples ' \
                                          f'on {self.split} split')
                         return
 
             self.epoch_idx += 1
-            if self.n_epochs is not None and self.epoch_idx == self.n_epochs:
+            if self.epoch_idx == self.n_epochs:
                 log_main_process(f'Finished generating {self.n_epochs} epochs ' \
                                  f'on {self.split} split')
                 return
+
+    def __len__(self) -> int:
+        return self.sampler_len
 
 
 def get_collate_fn(
@@ -317,8 +329,7 @@ def _load_persona(
                     for index in range(p * 200 + start, p * 200 + end)
                 ]
 
-            # train_indices = get_indices(seen_personas, start=0, end=100)
-            train_indices = list(range(10))
+            train_indices = get_indices(seen_personas, start=0, end=100)
             test_indices = get_indices(seen_personas, start=100, end=200)
             test_unseen_indices = get_indices(unseen_personas, start=0, end=200)
 

@@ -10,24 +10,28 @@ import torch.nn as nn
 from accelerate import PartialState
 
 
-@PartialState().on_main_process
-def log_main_process(message: str, level: str = 'info') -> None:
-    """Log only on main process."""
-    logger = _get_logger_with_context()
-    getattr(logger, level)(message)
+state = PartialState()
 
 
 def log_all_processes(message: str, level: str = 'info') -> None:
     """Log on all processes."""
-    logger = _get_logger_with_context()
+    # Get caller module name
+    caller_frame = inspect.currentframe().f_back
+    module_name = caller_frame.f_globals['__name__']
+
+    logger = logging.getLogger(module_name)
     getattr(logger, level)(message)
 
 
-def _get_logger_with_context() -> logging.Logger:
-    """Get the logger for the calling module."""
+@state.on_main_process
+def log_main_process(message: str, level: str = 'info') -> None:
+    """Log on main process."""
+    # Get caller module name
     caller_frame = inspect.currentframe().f_back
     module_name = caller_frame.f_globals['__name__']
-    return logging.getLogger(module_name)
+
+    logger = logging.getLogger(module_name)
+    getattr(logger, level)(message)
 
 
 def formatted_dict(d: dict) -> dict:

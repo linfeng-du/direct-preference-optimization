@@ -1,9 +1,8 @@
-# Configuration structure
 defaults:
   - _self_
   - model: gpt2
   - loss: dpo
-  - adaptor: mixture_of_loras
+  - adaptor: lora
 
 # Experiment name and output directory
 hydra:
@@ -17,14 +16,14 @@ local_run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
 seed: 0
 
 # the batch size for training; for FSDP, the batch size per GPU is batch_size / (grad_accumulation_steps * num_gpus)
-batch_size: 32
+batch_size: 16
 
 # the batch size during evaluation and sampling, if enabled
 eval_batch_size: 64
 
 # which dataset(s) to train on; can pass a list like datasets=[hh,shp]
-datasets:
-  - persona
+dataset: persona
+prepend_persona: true
 
 # whether or not to generate samples during evaluation; disable for FSDP/TensorParallel
 #   is recommended, because they are slow
@@ -44,39 +43,18 @@ lr: 5e-2
 #   accumulate gradients over 2 microbatches of size 2)
 gradient_accumulation_steps: 1
 
-# the maximum gradient norm to clip to
 max_grad_norm: 10.0
 
-# the maximum allowed length for an input (prompt + response)
 max_length: 512
-
-# the maximum allowed length for a prompt
 max_prompt_length: 256
 
-# the number of epochs to train for; if null, must specify n_examples
 n_epochs: 1
+n_examples: -1
 
-# the number of examples to train for; if null, must specify n_epochs
-n_examples: null
-
-# the number of examples to evaluate on (and sample from, if sample_during_eval is true)
 n_eval_examples: 256
 
-# the trainer class to use (e.g. BasicTrainer, FSDPTrainer)
-# trainer: FSDPHnetTrainer
-trainer: BasicTrainer
-
-# The optimizer to use; we use RMSprop because it works about as well as Adam and is more memory-efficient
 optimizer: AdamW
-
-# number of linear warmup steps for the learning rate
 warmup_steps: 150
-
-# whether or not to use activation/gradient checkpointing
 activation_checkpointing: false
-
-# evaluate and save model every eval_every steps
 eval_every: 4960
-
-# prevent wandb from logging more than once per minimum_log_interval_secs
 minimum_log_interval_secs: 0.0

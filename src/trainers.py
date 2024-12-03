@@ -11,10 +11,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import transformers
 from accelerate import Accelerator
 
-from preference_datasets import RLHFDataset
+from preference_datasets import PreferenceDataset, PreferenceSampler, get_collate_fn
 from utils import formatted_dict, pad_to_length, log_main_process
 
 
@@ -45,37 +46,47 @@ class AccelerateTrainer:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         log_main_process('Loading dataset')
-        data_iterator_kwargs = dict(
-            names=config.datasets,
+        self.train_dataset = PreferenceDataset(
+            dataset=config.dataset,
+            split='train',
             tokenizer=self.tokenizer,
-            shuffle=True,
             max_length=config.max_length,
             max_prompt_length=config.max_prompt_length,
-            sft_mode=config.loss.name == 'sft',
+            prepend_persona=config.prepend_persona
         )
-        self.train_dataset = RLHFDataset(
-            **data_iterator_kwargs,
-            split='train',
-            n_examples=config.n_examples,
-            n_epochs=config.n_epochs
-        )
-        self.train_iterator = torch.utils.data.DataLoader(
+        train_sampler = PreferenceSampler(
             self.train_dataset,
+            shuffle=True,
+            seed=config.seed,
+            n_epochs=config.n_epochs,
+            n_examples=config.n_examples
+        )
+        self.train_iterator = DataLoader(
+            dataset=self.train_dataset,
             batch_size=config.batch_size,
-            collate_fn=self.train_dataset.collate_fn,
-            shuffle=True
+            sampler=train_sampler,
+            collate_fn=get_collate_fn(self.tokenizer)
         )
 
-        self.eval_dataset = RLHFDataset(
-            **data_iterator_kwargs,
+        self.eval_dataset = PreferenceDataset(
+            dataset=config.dataset,
             split='test',
+            tokenizer=self.tokenizer,
+            max_length=config.max_length,
+            max_prompt_length=config.max_prompt_length,
+            prepend_persona=config.prepend_persona
+        )
+        eval_sampler = PreferenceSampler(
+            self.eval_dataset,
+            shuffle=False,
+            n_epochs=1,
             n_examples=config.n_eval_examples
         )
-        self.eval_iterator = torch.utils.data.DataLoader(
+        self.eval_iterator = DataLoader(
             self.eval_dataset,
             batch_size=config.eval_batch_size,
-            collate_fn=self.eval_dataset.collate_fn,
-            shuffle=False
+            sampler=eval_sampler,
+            collate_fn=get_collate_fn(self.tokenizer)
         )
 
         self.optimizer_non_loaded = getattr(
@@ -105,64 +116,51 @@ class AccelerateTrainer:
         self.batch_counter = 0
         last_log = None
 
-        for e in range(self.config.n_epochs):
-            self.evaluate()
-            for batch in self.train_iterator:
-                #### BEGIN EVALUATION ####
-                if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                    log_main_process("="*50)
-                    log_main_process("="*50)
-                    log_main_process(f'Running evaluation after {self.example_counter} train examples')
-                    log_main_process("="*50)
-                    log_main_process("="*50)
-                #### END EVALUATION ####
+        for batch in tqdm(self.train_iterator):
+            #### BEGIN EVALUATION ####
+            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
+                log_main_process(f'Running evaluation after {self.example_counter} train examples')
+                self.evaluate()
+            #### END EVALUATION ####
 
-                #### BEGIN TRAINING ####
-                if self.config.use_hnet :
-                    self.hnet_controller.change_forward('adaptor')
-                    self.hnet_controller.hyper_net.train()
-                    if self.config.hnet.hnet_forward:
-                        self.policy.eval()
-                    else:
-                        self.policy.train()
-                else:
-                    self.policy.train()
+            #### BEGIN TRAINING ####
+            self.policy.train()
 
-                start_time = time.time()
-                batch_metrics = defaultdict(list)
-                for microbatch_idx in range(self.config.gradient_accumulation_steps):
-                    loss, metrics = self.get_batch_metrics(batch, self.config.loss, train=True)
-                    self.first_pass = False
-                    l = (loss / self.config.gradient_accumulation_steps)
-                    self.accelerator.backward(l)
-                    for k, v in metrics.items():
-                        batch_metrics[k].extend(v)
+            start_time = time.time()
+            batch_metrics = defaultdict(list)
+            for microbatch_idx in range(self.config.gradient_accumulation_steps):
+                loss, metrics = self.get_batch_metrics(batch, self.config.loss, train=True)
+                self.first_pass = False
+                l = (loss / self.config.gradient_accumulation_steps)
+                self.accelerator.backward(l)
+                for k, v in metrics.items():
+                    batch_metrics[k].extend(v)
 
-                grad_norm = self.clip_gradient()
+            grad_norm = self.clip_gradient()
 
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
 
-                step_time = time.time() - start_time
-                examples_per_second = self.config.batch_size / step_time
-                batch_metrics['examples_per_second'].append(examples_per_second)
-                batch_metrics['grad_norm'].append(grad_norm)
+            step_time = time.time() - start_time
+            examples_per_second = self.config.batch_size / step_time
+            batch_metrics['examples_per_second'].append(examples_per_second)
+            batch_metrics['grad_norm'].append(grad_norm)
 
-                self.batch_counter += 1
-                self.example_counter += self.config.batch_size
+            self.batch_counter += 1
+            self.example_counter += self.config.batch_size
 
-                if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                    mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                    mean_train_metrics['counters/examples'] = self.example_counter
-                    mean_train_metrics['counters/updates'] = self.batch_counter
-                    log_main_process(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
+            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
+                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
+                mean_train_metrics['counters/examples'] = self.example_counter
+                mean_train_metrics['counters/updates'] = self.batch_counter
+                # log_main_process(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
 
-                    last_log = time.time()
-                else:
-                    log_main_process(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
-                #### END TRAINING ####
-            self.evaluate()
+                last_log = time.time()
+            else:
+                log_main_process(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
+            #### END TRAINING ####
+        self.evaluate()
 
     def evaluate(self):
         self.policy.eval()
@@ -184,11 +182,6 @@ class AccelerateTrainer:
             log_main_process(f'creating checkpoint to write to {output_dir}...')
             if self.config.save:
                 self.save(output_dir, mean_eval_metrics)
-
-
-
-
-
 
     def get_batch_samples(self, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the policy (and reference model, if doing DPO training) for the given batch of inputs."""
@@ -234,17 +227,6 @@ class AccelerateTrainer:
         train_test = 'train' if train else 'eval'
 
         if loss_config.name in {'dpo', 'ipo'}:
-            if self.config.hnet.hnet_forward and self.config.use_hnet: 
-                if self.config.hnet.use_dummies:
-                    layers = self.hnet(torch.ones_like(batch['user_emb']))
-                else:
-                    layers = self.hnet_controller.hyper_net(batch['user_emb'])
-
-                self.hnet_controller.updateLayers(layers,self.first_pass)
-                # print(f"{sum([x.hyperAdapterA.sum().item() for x in self.hnet_controller.hypernet_layers])=}")
-            if self.config.hnet_type == 'lora_hnet':
-                self.hnet_controller.updateLayers(batch['user_emb'])
-                
             policy_chosen_logps, policy_rejected_logps = self.concatenated_forward(self.policy, batch)
 
             with torch.no_grad():
@@ -317,20 +299,6 @@ class AccelerateTrainer:
 
         scheduler_state_dict = self.scheduler.state_dict()
         self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def preference_loss(

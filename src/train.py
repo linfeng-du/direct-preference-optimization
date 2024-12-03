@@ -2,7 +2,7 @@ import json
 
 import torch
 from transformers import AutoModelForCausalLM
-from accelerate import Accelerator, PartialState
+from accelerate import Accelerator
 
 import hydra
 from omegaconf import DictConfig
@@ -31,8 +31,7 @@ def accelerate_main(controller, config, reference_model=None):
     trainer.save()
 
 
-@PartialState().on_main_process
-@hydra.main(version_base=None, config_path='config', config_name='config')
+@hydra.main(version_base=None, config_path='../config', config_name='config')
 def main(config: DictConfig):
     """Main entry point for training.
 
@@ -81,7 +80,7 @@ def main(config: DictConfig):
 
     ControllerClass = get_controller_class(config.adaptor.name)
     controller = ControllerClass(policy)
-    controller.insert_adaptors(config.model.target_modules, **config.adaptor.args)
+    # controller.insert_adaptors(config.model.target_modules, **config.adaptor.args)
 
     accelerate_main(controller, config, reference_model=reference_model)
 
