@@ -6,37 +6,37 @@ from transformers.pytorch_utils import Conv1D
 
 
 class MixtureOfLoRAsController:
-    model: nn.Module
     adaptor_layers: list['MixtureOfLoRAsLayer']
 
-    def __init__(self, model: nn.Module) -> None:
-        self.model = model
+    def __init__(self, n_loras: int, r: int, alpha: int) -> None:
+        self.n_loras = n_loras
+        self.r = r
+        self.alpha = alpha
         self.adaptor_layers = []
 
-    def insert_adaptors(self, target_modules: list[str], **adaptor_kwargs) -> None:
-        """Replace target modules with adaptor layers and freeze base model paramters."""
-        for module_path, module in self.model.named_modules():
+    def insert_adaptors(self, model: nn.Module, target_modules: list[str]) -> None:
+        """Replace target modules with adaptor layers and freeze the base model parameters."""
+        for module_path, module in model.named_modules():
             module_name = module_path.split('.')[-1]
 
             if module_name in target_modules:
-                assert isinstance(module, (nn.Linear, Conv1D)), \
-                       'Target module must be Linear or Conv1D'
+                assert isinstance(module, (nn.Linear, Conv1D)), 'Target module must be Linear or Conv1D'
 
-                adaptor_layer = MixtureOfLoRAsLayer(module, **adaptor_kwargs)
+                adaptor_layer = MixtureOfLoRAsLayer(module, self.n_loras, self.r, self.alpha)
                 self.adaptor_layers.append(adaptor_layer)
 
-                # Replace target module with adaptor layer
+                # Replace the target module with an adaptor layer
                 parent_module_path = '.'.join(module_path.split('.')[:-1])
-                parent_module = self.model.get_submodule(parent_module_path)
+                parent_module = model.get_submodule(parent_module_path)
                 setattr(parent_module, module_name, adaptor_layer)
 
-        # Freeze base model paramters
-        for param_name, param in self.model.named_parameters():
-            if param.requires_grad and 'lora' not in param_name:
+        # Freeze the base model parameters
+        for param_path, param in model.named_parameters():
+            if 'lora_A' not in param_path and 'lora_B' not in param_path:
                 param.requires_grad = False
 
     def update_lora_weights(self, lora_weights: torch.Tensor) -> None:
-        """Update example-specific LoRA weights to all adaptor layers."""
+        """Update example-specific LoRA weights for all adaptor layers."""
         for adaptor_layer in self.adaptor_layers:
             adaptor_layer.update_lora_weights(lora_weights)
 
