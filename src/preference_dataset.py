@@ -7,8 +7,8 @@ import datasets
 from transformers import PreTrainedTokenizerBase
 
 import torch
-from torch.utils.data import Dataset, Sampler
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, Sampler
 
 from tqdm import tqdm
 
@@ -26,7 +26,7 @@ class PreferenceDataset(Dataset):
         max_prompt_length: int,
         **loader_kwargs: Any
     ) -> None:
-        """Load dataset split by its name and flatten to get examples."""
+        """Load the dataset split by its name and flatten to get the examples."""
         self.split = split
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -41,7 +41,7 @@ class PreferenceDataset(Dataset):
             pairs = prompt_data.pop('pairs')
 
             indices = []
-            for idx, (chosen, rejected) in enumerate(pairs):
+            for pair_idx, (chosen, rejected) in enumerate(pairs):
                 others = {}
                 for key, val in prompt_data.items():
                     if isinstance(val, str):
@@ -49,7 +49,7 @@ class PreferenceDataset(Dataset):
                         others[key] = val
                     elif isinstance(val, list):
                         # Example-level property
-                        others[key] = val[idx]
+                        others[key] = val[pair_idx]
 
                 indices.append(len(self.examples))
                 self.examples.append((
@@ -91,20 +91,19 @@ class PreferenceDataset(Dataset):
 class PreferenceSampler(Sampler):
 
     def __init__(
-            self,
-            dataset: PreferenceDataset,
-            shuffle: bool,
-            seed: int | None = None,
-            n_epochs: int = -1,
-            n_examples: int = -1
-        ) -> None:
-        assert n_epochs > 0 or n_examples > 0, \
-               'Must specify either n_epochs or n_examples'
+        self,
+        dataset: PreferenceDataset,
+        shuffle: bool,
+        seed: int | None = None,
+        n_epochs: int = -1,
+        n_examples: int = -1
+    ) -> None:
+        assert n_epochs > 0 or n_examples > 0, 'Must specify either n_epochs or n_examples'
 
         self.shuffle = shuffle
+        self.seed = seed
         self.n_epochs = n_epochs
         self.n_examples = n_examples
-        self.seed = seed
 
         self.split = dataset.split
         self.grouped_indices = dataset.grouped_indices[:]
@@ -133,14 +132,16 @@ class PreferenceSampler(Sampler):
 
                     self.example_idx += 1
                     if self.example_idx == self.n_examples:
-                        log_main_process(f'Finished generating {self.n_examples} examples ' \
-                                         f'on {self.split} split')
+                        log_main_process(f'Finished generating {self.n_examples} examples on {self.split} split')
+                        self.epoch_idx = 0
+                        self.example_idx = 0
                         return
 
             self.epoch_idx += 1
             if self.epoch_idx == self.n_epochs:
-                log_main_process(f'Finished generating {self.n_epochs} epochs ' \
-                                 f'on {self.split} split')
+                log_main_process(f'Finished generating {self.n_epochs} epochs on {self.split} split')
+                self.epoch_idx = 0
+                self.example_idx = 0
                 return
 
     def __len__(self) -> int:
@@ -161,7 +162,7 @@ def get_collate_fn(
         for key in batch[0]:
             if key.endswith(('_input_ids', '_attention_mask', '_labels')):
                 if 'prompt' in key:
-                    # Flip prompt tokens before right padding
+                    # Reverse the prompt tokens before right padding
                     sequences = [torch.tensor(e[key][::-1], dtype=torch.long) for e in batch]
                 else:
                     sequences = [torch.tensor(e[key], dtype=torch.long) for e in batch]
@@ -180,7 +181,7 @@ def get_collate_fn(
                     padding_side='right'
                 )
                 if 'prompt' in key:
-                    # Flip back so padding is on the left side
+                    # Flip them back to place the padding on the left side
                     padded_batch[key] = padded_batch[key].flip(dims=[1])
             else:
                 padded_batch[key] = [e[key] for e in batch]
@@ -201,11 +202,11 @@ def _tokenize_example(
 ) -> dict[str, str | list[int]]:
     """Tokenize a single example.
 
-    Handle truncation when the prompt + chosen or prompt + rejected responses is/are too long.
-    Truncate the prompt first; if still too long, truncate the chosen/rejected responses.
+    Handle truncation when the prompt + chosen or prompt + rejected responses exceeds max_length.
+    Truncate the prompt first, and if still too long, truncate the chosen and rejected responses.
 
-    Create SFT labels for the chosen/rejected responses, which are of length equal to
-    the sum of the length of the prompt and the chosen/rejected response.
+    Create SFT labels for the chosen and rejected responses,
+    with lengths equal to the sum of the prompt length and the respective chosen or rejected response.
     Labels for the prompt tokens are set to -100.
     """
     prompt_tokens = tokenizer(prompt, add_special_tokens=False)
@@ -218,7 +219,7 @@ def _tokenize_example(
     rejected_tokens['input_ids'].append(tokenizer.eos_token_id)
     rejected_tokens['attention_mask'].append(1)
 
-    # If the combined sequence is too long, truncate the prompt
+    # If the combined sequence exceeds max_length, truncate the prompt first
     prompt_length = len(prompt_tokens['input_ids'])
     chosen_length = len(chosen_tokens['input_ids'])
     rejected_length = len(rejected_tokens['input_ids'])
@@ -226,46 +227,30 @@ def _tokenize_example(
 
     if prompt_length + longer_response_length > max_length:
         if truncation_mode == 'keep_start':
-            prompt_tokens = {
-                k: v[:max_prompt_length]
-                for k, v in prompt_tokens.items()
-            }
+            prompt_tokens = {k: v[:max_prompt_length] for k, v in prompt_tokens.items()}
         elif truncation_mode == 'keep_end':
-            prompt_tokens = {
-                k: v[-max_prompt_length:]
-                for k, v in prompt_tokens.items()
-            }
+            prompt_tokens = {k: v[-max_prompt_length:] for k, v in prompt_tokens.items()}
         else:
             raise ValueError(f'Unknown truncation mode: {truncation_mode}')
 
-    # If that's still too long, truncate the response
+    # If still too long, truncate the response
     prompt_length = len(prompt_tokens['input_ids'])
 
     if prompt_length + longer_response_length > max_length:
         max_response_length = max_length - max_prompt_length
-        chosen_tokens = {
-            k: v[:max_response_length]
-            for k, v in chosen_tokens.items()
-        }
-        rejected_tokens = {
-            k: v[:max_response_length]
-            for k, v in rejected_tokens.items()
-        }
+        chosen_tokens = {k: v[:max_response_length] for k, v in chosen_tokens.items()}
+        rejected_tokens = {k: v[:max_response_length] for k, v in rejected_tokens.items()}
 
-    chosen_sequence_tokens = {
-        k: prompt_tokens[k] + chosen_tokens[k]
-        for k in chosen_tokens
-    }
-    rejected_sequence_tokens = {
-        k: prompt_tokens[k] + rejected_tokens[k]
-        for k in rejected_tokens
-    }
+    # Prepend the prompt to the responses
+    chosen_tokens = {k: prompt_tokens[k] + chosen_tokens[k] for k in chosen_tokens}
+    rejected_tokens = {k: prompt_tokens[k] + rejected_tokens[k] for k in rejected_tokens}
 
     # Create labels
-    chosen_sequence_tokens['labels'] = chosen_sequence_tokens['input_ids'][:]
-    chosen_sequence_tokens['labels'][:prompt_length] = [-100] * prompt_length
-    rejected_sequence_tokens['labels'] = rejected_sequence_tokens['input_ids'][:]
-    rejected_sequence_tokens['labels'][:prompt_length] = [-100] * prompt_length
+    chosen_tokens['labels'] = chosen_tokens['input_ids'][:]
+    chosen_tokens['labels'][:prompt_length] = [-100] * prompt_length
+
+    rejected_tokens['labels'] = rejected_tokens['input_ids'][:]
+    rejected_tokens['labels'][:prompt_length] = [-100] * prompt_length
 
     example = {
         'prompt': prompt,
@@ -277,15 +262,12 @@ def _tokenize_example(
 
     categories = {
         'prompt': prompt_tokens,
-        'chosen': chosen_sequence_tokens,
-        'rejected': rejected_sequence_tokens
+        'chosen': chosen_tokens,
+        'rejected': rejected_tokens
     }
     for category, tokens in categories.items():
-        for tokens_key, tokens_val in tokens.items():
-            if tokens_key == 'token_type_ids':
-                continue
-
-            example[f'{category}_{tokens_key}'] = tokens_val
+        for key, val in tokens.items():
+            example[f'{category}_{key}'] = val
 
     return example
 
@@ -293,7 +275,7 @@ def _tokenize_example(
 def _load_persona(
     split: str,
     prepend_persona: bool
-) -> dict[str, dict[str, str | list[str] | list[tuple[int, int]]]]:
+) -> dict[str, dict[str, list[str] | list[tuple[int, int]]]]:
     """Load the PERSONA dataset from Huggingface and convert it to the necessary format.
 
     The dataset is converted to a dictionary with the following structure:
@@ -307,10 +289,10 @@ def _load_persona(
     }
 
     Prompts should be structured as follows:
-         \n\nHuman: <prompt>\n\nAssistant:
+        \n\nHuman: <prompt>\n\nAssistant:
     """
     def get_split_indices(split: str):
-        """Create train/test/test_unseen splits for the PERSONA dataset.
+        """Create train, test, and test_unseen splits for the PERSONA dataset.
 
         The dataset contains 1,000 personas, each with 100 training and testing examples.
         Randomly reserve 200 personas as the unseen test set.
@@ -322,16 +304,12 @@ def _load_persona(
 
             # For each persona, the first 100 examples are used for training,
             # and the following 100 examples are used for testing
-            def get_indices(personas, start, end):
-                return [
-                    index
-                    for p in personas
-                    for index in range(p * 200 + start, p * 200 + end)
-                ]
+            def get_example_indices(personas, start, end):
+                return [index for p in personas for index in range(p * 200 + start, p * 200 + end)]
 
-            train_indices = get_indices(seen_personas, start=0, end=100)
-            test_indices = get_indices(seen_personas, start=100, end=200)
-            test_unseen_indices = get_indices(unseen_personas, start=0, end=200)
+            train_indices = get_example_indices(seen_personas, start=0, end=100)
+            test_indices = get_example_indices(seen_personas, start=100, end=200)
+            test_unseen_indices = get_example_indices(unseen_personas, start=0, end=200)
 
             get_split_indices._splits = {
                 'train': train_indices,
@@ -341,7 +319,7 @@ def _load_persona(
 
         return get_split_indices._splits[split]
 
-    log_main_process(f'Loading PERSONA dataset ({split} split)')
+    log_main_process(f'Loading PERSONA dataset ({split} split)...')
 
     dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
     data = defaultdict(lambda: defaultdict(list))
