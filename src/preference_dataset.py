@@ -233,7 +233,7 @@ def _tokenize_example(
         else:
             raise ValueError(f'Unknown truncation mode: {truncation_mode}')
 
-    # If still too long, truncate the response
+    # If still too long, truncate the responses
     prompt_length = len(prompt_tokens['input_ids'])
 
     if prompt_length + longer_response_length > max_length:
