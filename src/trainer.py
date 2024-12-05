@@ -1,5 +1,4 @@
 import os
-import time
 import random
 from collections import defaultdict
 
@@ -111,7 +110,6 @@ class AccelerateTrainer:
         self.eval_iterator = accelerator.prepare(self.eval_iterator)
         self.test_iterator = accelerator.prepare(self.test_iterator)
     
-
     def train(self):
         """Begin either SFT or DPO training, with periodic evaluation."""
         torch.manual_seed(self.config.seed)
@@ -122,23 +120,14 @@ class AccelerateTrainer:
             self.reference_model.eval()
 
         self.example_counter = 0
-        self.batch_counter = 0
-        last_log = None
 
         for batch in tqdm(self.train_iterator):
-            #### BEGIN EVALUATION ####
-            if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
-                log_main_process(f'Running evaluation after {self.example_counter} train examples')
-                self.evaluate()
-            #### END EVALUATION ####
-
             #### BEGIN TRAINING ####
             self.policy.train()
 
-            start_time = time.time()
             batch_metrics = defaultdict(list)
 
-            for microbatch_idx in range(self.config.gradient_accumulation_steps):
+            for _ in range(self.config.gradient_accumulation_steps):
                 loss, metrics = self.get_batch_metrics(batch, self.config.loss, train=True)
                 self.first_pass = False
                 l = (loss / self.config.gradient_accumulation_steps)
@@ -146,30 +135,21 @@ class AccelerateTrainer:
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
 
-                grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
 
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
 
-            step_time = time.time() - start_time
-            examples_per_second = self.config.batch_size / step_time
-            batch_metrics['examples_per_second'].append(examples_per_second)
-            batch_metrics['grad_norm'].append(grad_norm)
-
-            self.batch_counter += 1
             self.example_counter += self.config.batch_size
-
-            if last_log is None or time.time() - last_log > self.config.minimum_log_interval_secs:
-                mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
-                mean_train_metrics['counters/examples'] = self.example_counter
-                mean_train_metrics['counters/updates'] = self.batch_counter
-                # log_main_process(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
-
-                last_log = time.time()
-            else:
-                log_main_process(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
             #### END TRAINING ####
+
+            #### BEGIN EVALUATION ####
+            if self.example_counter % self.config.eval_every == 0:
+                log_main_process(f'Running evaluation after {self.example_counter} train examples')
+                self.evaluate()
+            #### END EVALUATION ####
+
         self.evaluate()
 
     def evaluate(self):
@@ -328,7 +308,6 @@ def _compute_response_logps(logits: torch.Tensor, labels: torch.Tensor) -> torch
     """
     logits = logits[:, :-1, :]
     labels = labels[:, 1:]
-
     token_mask = labels != -100
 
     logps = logits.log_softmax(dim=-1)

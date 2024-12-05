@@ -291,7 +291,7 @@ def _load_persona(
     Prompts should be structured as follows:
         \n\nHuman: <prompt>\n\nAssistant:
     """
-    def get_split_indices(split: str):
+    def get_split_indices():
         """Create train, test, and test_unseen splits for the PERSONA dataset.
 
         The dataset contains 1,000 personas, each with 100 training and testing examples.
@@ -319,12 +319,12 @@ def _load_persona(
 
         return get_split_indices._splits[split]
 
-    log_main_process(f'Loading PERSONA dataset ({split} split)...')
+    log_main_process(f'Loading PERSONA dataset {split} split...')
 
     dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
     data = defaultdict(lambda: defaultdict(list))
 
-    for index in tqdm(get_split_indices(split), desc='Processing PERSONA'):
+    for index in tqdm(get_split_indices(split), desc=f'Processing PERSONA {split} split'):
         example = dataset[index]
 
         prompt = example['instruction']
