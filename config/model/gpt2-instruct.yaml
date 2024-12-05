@@ -1,4 +1,4 @@
-model: gpt2
+model: vicgalle/gpt2-open-instruct-v1
 
 policy_dtype: float32
 reference_dtype: float16

@@ -1,10 +1,9 @@
 defaults:
   - _self_
-  - model: gpt2
+  - model: gpt2-instruct
   - loss: dpo
   - adaptor: lora
 
-# Experiment name and output directory
 hydra:
   run:
     dir: ${local_run_dir}
@@ -12,35 +11,21 @@ hydra:
 exp_name: debug
 local_run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
 
-# random seed for batch sampling
 seed: 0
+batch_size: 8
+eval_batch_size: 32
+save: true
 
-# the batch size for training; for FSDP, the batch size per GPU is batch_size / (grad_accumulation_steps * num_gpus)
-batch_size: 16
-
-# the batch size during evaluation and sampling, if enabled
-eval_batch_size: 64
-
-# which dataset(s) to train on; can pass a list like datasets=[hh,shp]
 dataset: persona
 prepend_persona: true
 
-# whether or not to generate samples during evaluation; disable for FSDP/TensorParallel
-#   is recommended, because they are slow
 sample_during_eval: false
-
-# how many model samples to generate during evaluation
 n_eval_model_samples: 0
-
-# whether to eval at the very beginning of training
 do_first_eval: true
 
-# the learning rate
-lr: 5e-2
+# lr: 5e-2
+lr: 5e-5
 
-# number of steps to accumulate over for each batch
-#   (e.g. if batch_size=4 and gradient_accumulation_steps=2, then we will
-#   accumulate gradients over 2 microbatches of size 2)
 gradient_accumulation_steps: 1
 
 max_grad_norm: 10.0

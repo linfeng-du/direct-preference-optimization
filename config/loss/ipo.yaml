@@ -1,4 +1,3 @@
-loss: dpo
+loss: ipo
 reference_free: false
 beta: 0.3
-epsilon: 0.

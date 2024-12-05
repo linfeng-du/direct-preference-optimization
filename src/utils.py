@@ -13,9 +13,10 @@ from accelerate import PartialState
 state = PartialState()
 
 
-def log_all_processes(message: str, level: str = 'info') -> None:
-    """Log on all processes."""
-    # Get caller module name
+@state.on_main_process
+def log_main_process(message: str, level: str = 'info') -> None:
+    """Log only on the main process."""
+    # Get the caller module name
     caller_frame = inspect.currentframe().f_back
     module_name = caller_frame.f_globals['__name__']
 
@@ -23,9 +24,8 @@ def log_all_processes(message: str, level: str = 'info') -> None:
     getattr(logger, level)(message)
 
 
-@state.on_main_process
-def log_main_process(message: str, level: str = 'info') -> None:
-    """Log on main process."""
+def log_all_processes(message: str, level: str = 'info') -> None:
+    """Log on all processes."""
     # Get caller module name
     caller_frame = inspect.currentframe().f_back
     module_name = caller_frame.f_globals['__name__']

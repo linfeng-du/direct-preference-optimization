@@ -4,18 +4,20 @@ import random
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Union
 
-from tqdm import tqdm
-from omegaconf import DictConfig
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import transformers
+from transformers import AutoTokenizer
 from accelerate import Accelerator
 
-from preference_datasets import PreferenceDataset, PreferenceSampler, get_collate_fn
+from tqdm import tqdm
+from omegaconf import DictConfig
+
+from adaptors import Controller
+from preference_dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
 from utils import formatted_dict, pad_to_length, log_main_process
 
 
@@ -23,25 +25,21 @@ class AccelerateTrainer:
 
     def __init__(
         self,
-        accelerator: Accelerator,
-        controller: nn.Module,
         config: DictConfig,
-        reference_model: Optional[nn.Module] = None,
+        policy: nn.Module,
+        controller: Controller | None,
+        reference_model: nn.Module | None,
+        accelerator: Accelerator
     ):
-        """A trainer for a language model, supporting either SFT or DPO training.
-
-           If multiple GPUs are present, naively splits the model across them, effectively
-           offering N times available memory, but without any parallel computation.
-        """
+        """Trainer that leverages Hugging Face Accelerate for distributed training."""
+        self.config = config
+        self.policy = policy
         self.accelerator = accelerator
         self.controller = controller
-        self.config = config
-
-        self.policy = self.controller.model
         self.reference_model = reference_model
 
         log_main_process('Loading tokenizer')
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(config.model.name)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model.model)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
@@ -56,7 +54,7 @@ class AccelerateTrainer:
         )
         train_sampler = PreferenceSampler(
             self.train_dataset,
-            shuffle=True,
+            shuffle=False,
             seed=config.seed,
             n_epochs=config.n_epochs,
             n_examples=config.n_examples
@@ -90,8 +88,7 @@ class AccelerateTrainer:
         )
 
         self.optimizer_non_loaded = getattr(
-            torch.optim,
-            self.config.optimizer
+            torch.optim, self.config.optimizer
         )([p for p in self.policy.parameters() if p.requires_grad], lr=self.config.lr)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer_non_loaded,
@@ -109,7 +106,7 @@ class AccelerateTrainer:
         np.random.seed(self.config.seed)
         random.seed(self.config.seed)
 
-        if self.config.loss.name in {'dpo', 'ipo'}:
+        if self.config.loss.loss in {'dpo', 'ipo'}:
             self.reference_model.eval()
 
         self.example_counter = 0
@@ -128,6 +125,7 @@ class AccelerateTrainer:
 
             start_time = time.time()
             batch_metrics = defaultdict(list)
+
             for microbatch_idx in range(self.config.gradient_accumulation_steps):
                 loss, metrics = self.get_batch_metrics(batch, self.config.loss, train=True)
                 self.first_pass = False
@@ -136,11 +134,11 @@ class AccelerateTrainer:
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
 
-            grad_norm = self.clip_gradient()
+                grad_norm = self.clip_gradient()
 
-            self.optimizer.step()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
+                self.optimizer.step()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
 
             step_time = time.time() - start_time
             examples_per_second = self.config.batch_size / step_time
@@ -166,7 +164,7 @@ class AccelerateTrainer:
         self.policy.eval()
         all_eval_metrics = defaultdict(list)
 
-        for eval_batch in tqdm(self.eval_iterator, desc='Computing eval metrics', disable=not self.accelerator.is_main_process):
+        for eval_batch in tqdm(self.eval_iterator, desc='Computing eval metrics'):
             local_eval_batch = eval_batch
             with torch.no_grad():
                 _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
@@ -183,69 +181,29 @@ class AccelerateTrainer:
             if self.config.save:
                 self.save(output_dir, mean_eval_metrics)
 
-    def get_batch_samples(self, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
-        """Generate samples from the policy (and reference model, if doing DPO training) for the given batch of inputs."""
-
-        policy_output = self.policy.generate(
-            batch['prompt_input_ids'], attention_mask=batch['prompt_attention_mask'], max_length=self.config.max_length, do_sample=True, pad_token_id=self.tokenizer.pad_token_id)
-
-        if self.config.loss.name in {'dpo', 'ipo'}:
-            reference_output = self.reference_model.generate(
-                batch['prompt_input_ids'], attention_mask=batch['prompt_attention_mask'], max_length=self.config.max_length, do_sample=True, pad_token_id=self.tokenizer.pad_token_id)
-
-        policy_output = pad_to_length(policy_output, self.config.max_length, self.tokenizer.pad_token_id)
-        policy_output = self.accelerator.gather(policy_output)
-        policy_output_decoded = self.tokenizer.batch_decode(policy_output, skip_special_tokens=True)
-
-        if self.config.loss.name in {'dpo', 'ipo'}:
-            reference_output = pad_to_length(reference_output, self.config.max_length, self.tokenizer.pad_token_id)
-            reference_output = self.accelerator.gather(reference_output)
-            reference_output_decoded = self.tokenizer.batch_decode(reference_output, skip_special_tokens=True)
-        else:
-            reference_output_decoded = []
-
-        return policy_output_decoded, reference_output_decoded
-    
-    def concatenated_forward(self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
-        
-           We do this to avoid doing two forward passes, because it's faster for FSDP.
-        """
-        #THIS HAS CHOSEN AND REJECTED SPERATED AND THIS JUST CONCATENATES THEM ACROSS THE ROWS SO 2BATCH_SIZE X SEQUENCE_LENGTH X HIDEN DIM
-        concatenated_batch = concatenated_inputs(batch)
-
-        all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
-        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
-        chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
-        rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
-        return chosen_logps, rejected_logps
-
     def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
 
         metrics = {}
         train_test = 'train' if train else 'eval'
 
-        if loss_config.name in {'dpo', 'ipo'}:
+        if loss_config.loss in {'dpo', 'ipo'}:
             policy_chosen_logps, policy_rejected_logps = self.concatenated_forward(self.policy, batch)
 
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
 
-            if loss_config.name == 'dpo':
-                loss_kwargs = {'beta': loss_config.beta, 'reference_free': loss_config.reference_free, 'label_smoothing': loss_config.label_smoothing, 'ipo': False}
-            elif loss_config.name == 'ipo':
-                loss_kwargs = {'beta': loss_config.beta, 'ipo': True}
-            else:
-                raise ValueError(f'unknown loss {loss_config.name}')
-
             losses, chosen_rewards, rejected_rewards = preference_loss(
-                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, **loss_kwargs)
+                policy_chosen_logps,
+                policy_rejected_logps,
+                reference_chosen_logps,
+                reference_rejected_logps,
+                **loss_config
+            )
 
             reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
             chosen_rewards = self.accelerator.gather(chosen_rewards)
-
             rejected_rewards = self.accelerator.gather(rejected_rewards)
             reward_accuracies = self.accelerator.gather(reward_accuracies)
 
@@ -267,7 +225,21 @@ class AccelerateTrainer:
         metrics[f'loss/{train_test}'] = all_devices_losses.cpu().numpy().tolist()
 
         return losses.mean(), metrics
-    
+
+    def concatenated_forward(self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+        
+           We do this to avoid doing two forward passes, because it's faster for FSDP.
+        """
+        #THIS HAS CHOSEN AND REJECTED SPERATED AND THIS JUST CONCATENATES THEM ACROSS THE ROWS SO 2BATCH_SIZE X SEQUENCE_LENGTH X HIDEN DIM
+        concatenated_batch = concatenated_inputs(batch)
+
+        all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
+        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
+        chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
+        rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
+        return chosen_logps, rejected_logps
+
     def clip_gradient(self):
         """Clip the gradient norm of the parameters of a non-FSDP policy."""
         return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
@@ -281,11 +253,11 @@ class AccelerateTrainer:
         output_path = os.path.join(dir_name, filename)
         log_main_process(f'writing checkpoint to {output_path}...')
         torch.save({
-            'step_idx': step,
-            'state': state,
+            'step': step,
             'metrics': metrics if metrics is not None else {},
+            'state': state
         }, output_path)
-    
+
     def save(self, output_dir: Optional[str] = None, metrics: Optional[Dict] = None):
         """Save policy, optimizer, and scheduler state to disk."""
 
@@ -302,83 +274,49 @@ class AccelerateTrainer:
 
 
 def preference_loss(
-    policy_chosen_logps: torch.FloatTensor,
-    policy_rejected_logps: torch.FloatTensor,
-    reference_chosen_logps: torch.FloatTensor,
-    reference_rejected_logps: torch.FloatTensor,
+    policy_chosen_logps: torch.Tensor,
+    policy_rejected_logps: torch.Tensor,
+    reference_chosen_logps: torch.Tensor,
+    reference_rejected_logps: torch.Tensor,
+    loss: str,
+    reference_free: bool,
     beta: float,
-    label_smoothing: float = 0.0,
-    ipo: bool = False,
-    reference_free: bool = False
-) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-    """Compute the DPO loss for a batch of policy and reference model log probabilities.
+    epsilon: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the preference loss based on the log probabilities assigined by the policy and reference models.
 
-    Args:
-        policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
-        policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
-        reference_chosen_logps: Log probabilities of the reference model for the chosen responses. Shape: (batch_size,)
-        reference_rejected_logps: Log probabilities of the reference model for the rejected responses. Shape: (batch_size,)
-        beta: Temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5. We ignore the reference model as beta -> 0.
-        label_smoothing: conservativeness for DPO loss, which assumes that preferences are noisy (flipped with probability label_smoothing)
-        ipo: If True, use the IPO loss instead of the DPO loss.
-        reference_free: If True, we ignore the _provided_ reference model and implicitly use a reference model that assigns equal probability to all responses.
+    General Args:
+        policy_chosen_logps: Log probabilities of the chosen responses assigned by the policy model.
+        policy_rejected_logps: Log probabilities of the rejected responses assigned by the policy model.
+        reference_chosen_logps: Log probabilities of the chosen responses assigned by the reference model.
+        reference_rejected_logps: Log probabilities of the rejected responses assigned by the reference model.
+        loss: The type of loss function for computing the preference loss.
+        reference_free: If True, use a reference model that assigns equal probability to all responses instead.
+        beta: Temperature, typically in the range of 0.1 to 0.5. The reference model is ignored as beta approaches 0.
+              Also known as tau in Eq. 17 of https://arxiv.org/pdf/2310.12036.
 
-    Returns:
-        A tuple of three tensors: (losses, chosen_rewards, rejected_rewards).
-        The losses tensor contains the DPO loss for each example in the batch.
-        The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
+    DPO Args:
+        epsilon: Conservativeness, assuming that the preference labels are flipped with a probability of epsilon.
     """
-    pi_logratios = policy_chosen_logps - policy_rejected_logps
-    ref_logratios = reference_chosen_logps - reference_rejected_logps
+    policy_logratios = policy_chosen_logps - policy_rejected_logps
+    reference_logratios = reference_chosen_logps - reference_rejected_logps
 
     if reference_free:
-        ref_logratios = 0
+        reference_logratios = 0.
 
-    logits = pi_logratios - ref_logratios  # also known as h_{\pi_\theta}^{y_w,y_l}
+    # Also known as h_\pi(y_w,y_l) in Eq. 17 of https://arxiv.org/pdf/2310.12036
+    logits = policy_logratios - reference_logratios
 
-    if ipo:
-        losses = (logits - 1/(2 * beta)) ** 2  # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
-    else:
-        # Eq. 3 https://ericmitchell.ai/cdpo.pdf; label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
-        losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
+    if loss == 'dpo':
+        # Eq. 3 of https://ericmitchell.ai/cdpo.pdf
+        # epsilon = 0 gives the original DPO loss (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
+        losses = -(1 - epsilon) * F.logsigmoid(beta * logits) - epsilon * F.logsigmoid(-beta * logits)
+    elif loss == 'ipo':
+        # Eq. 17 of https://arxiv.org/pdf/2310.12036
+        losses = torch.square(logits - 1 / (2 * beta))
 
     chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
-
-    return losses, chosen_rewards, rejected_rewards
-
-
-def bradley_terry_loss(
-    policy_chosen_logps: torch.FloatTensor,
-    policy_rejected_logps: torch.FloatTensor,
-    beta: float,
-    label_smoothing: float = 0.0,
-    ipo: bool = False
-) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-    """Compute the Bradley-Terry loss for a batch of policy model log probabilities without reference model.
-
-    Args:
-        policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
-        policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
-        beta: Temperature parameter for the Bradley-Terry loss, typically something in the range of 0.1 to 0.5.
-        label_smoothing: Conservativeness for the Bradley-Terry loss, which assumes that preferences are noisy (flipped with probability label_smoothing)
-        ipo: If True, use the IPO loss instead of the Bradley-Terry loss.
-
-    Returns:
-        A tuple of three tensors: (losses, chosen_rewards, rejected_rewards).
-        The losses tensor contains the Bradley-Terry loss for each example in the batch.
-        The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
-    """
-    
-    # Compute the logit ratios for the policy model
-    policy_logit_ratios = policy_chosen_logps - policy_rejected_logps
-
-
-    losses = -F.logsigmoid(beta * policy_logit_ratios) * (1 - label_smoothing) - F.logsigmoid(-beta * policy_logit_ratios) * label_smoothing
-
-    # Compute rewards for chosen and rejected responses
-    chosen_rewards = beta * policy_chosen_logps.detach()
-    rejected_rewards = beta * policy_rejected_logps.detach()
 
     return losses, chosen_rewards, rejected_rewards
 
@@ -439,6 +377,5 @@ def concatenated_inputs(batch: Dict[str, Union[List, torch.LongTensor]]) -> Dict
                 concatenated_batch[concatenated_key],
                 pad_to_length(batch[k], max_length, pad_value=pad_value),
             ), dim=0)
-
 
     return concatenated_batch
