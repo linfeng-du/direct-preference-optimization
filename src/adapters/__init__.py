@@ -7,9 +7,9 @@ from .mixture_of_loras import MixtureOfLoRAsController
 Controller = LoRAController | MixtureOfLoRAsController
 
 
-def get_controller(adaptor: str, **adaptor_kwargs: Any) -> Controller:
+def get_controller(adapter: str, **adapter_kwargs: Any) -> Controller:
     controller_classes = {
         'lora': LoRAController,
         'mixture_of_loras': MixtureOfLoRAsController
     }
-    return controller_classes[adaptor](**adaptor_kwargs)
+    return controller_classes[adapter](**adapter_kwargs)

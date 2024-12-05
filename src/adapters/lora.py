@@ -7,28 +7,28 @@ from transformers.pytorch_utils import Conv1D
 
 
 class LoRAController:
-    adaptor_layers: list['LoRALayer']
+    adapter_layers: list['LoRALayer']
 
     def __init__(self, r: int, alpha: int) -> None:
         self.r = r
         self.alpha = alpha
-        self.adaptor_layers = []
+        self.adapter_layers = []
 
-    def insert_adaptors(self, model: nn.Module, target_modules: list[str]) -> None:
-        """Replace target modules with adaptor layers and freeze the base model parameters."""
+    def insert_adapters(self, model: nn.Module, target_modules: list[str]) -> None:
+        """Replace target modules with adapter layers and freeze the base model parameters."""
         for module_path, module in model.named_modules():
             module_name = module_path.split('.')[-1]
 
             if module_name in target_modules:
                 assert isinstance(module, (nn.Linear, Conv1D)), 'Target module must be Linear or Conv1D'
 
-                adaptor_layer = LoRALayer(module, self.r, self.alpha)
-                self.adaptor_layers.append(adaptor_layer)
+                adapter_layer = LoRALayer(module, self.r, self.alpha)
+                self.adapter_layers.append(adapter_layer)
 
-                # Replace the target module with an adaptor layer
+                # Replace the target module with an adapter layer
                 parent_module_path = '.'.join(module_path.split('.')[:-1])
                 parent_module = model.get_submodule(parent_module_path)
-                setattr(parent_module, module_name, adaptor_layer)
+                setattr(parent_module, module_name, adapter_layer)
 
         # Freeze the base model parameters
         for param_path, param in model.named_parameters():

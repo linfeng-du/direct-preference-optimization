@@ -2,14 +2,14 @@ defaults:
   - _self_
   - model: gpt2-instruct
   - loss: dpo
-  - adaptor: lora
+  - adapter: lora
 
 hydra:
   run:
-    dir: ${local_run_dir}
+    dir: ${run_dir}
 
 exp_name: debug
-local_run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
+run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
 
 seed: 0
 batch_size: 8
@@ -41,5 +41,5 @@ n_eval_examples: 256
 optimizer: AdamW
 warmup_steps: 150
 activation_checkpointing: false
-eval_every: 4960
-minimum_log_interval_secs: 0.0
+eval_every: 19840
+minimum_log_interval_secs: 0.

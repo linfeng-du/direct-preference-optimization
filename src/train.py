@@ -5,7 +5,7 @@ from accelerate import Accelerator
 import hydra
 from omegaconf import DictConfig
 
-from adaptors import get_controller
+from adapters import get_controller
 from trainer import AccelerateTrainer
 from utils import disable_dropout, log_main_process, log_all_processes
 
@@ -56,14 +56,11 @@ def main(config: DictConfig):
             low_cpu_mem_usage=True
         )
         disable_dropout(reference_model)
-    else:
-        reference_model = None
-        raise NotImplementedError('SFT not implemented yet')
 
-    log_main_process(f'Inserting {config.adaptor.adaptor} adaptors...')
+    log_main_process(f'Inserting {config.adapter.adapter} adapters...')
 
-    controller = get_controller(**config.adaptor)
-    controller.insert_adaptors(policy, config.model.target_modules)
+    controller = get_controller(**config.adapter)
+    controller.insert_adapters(policy, config.model.target_modules)
 
     accelerate_main(config, policy, controller, reference_model)
 

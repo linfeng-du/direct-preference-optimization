@@ -6,29 +6,29 @@ from transformers.pytorch_utils import Conv1D
 
 
 class MixtureOfLoRAsController:
-    adaptor_layers: list['MixtureOfLoRAsLayer']
+    adapter_layers: list['MixtureOfLoRAsLayer']
 
     def __init__(self, n_loras: int, r: int, alpha: int) -> None:
         self.n_loras = n_loras
         self.r = r
         self.alpha = alpha
-        self.adaptor_layers = []
+        self.adapter_layers = []
 
-    def insert_adaptors(self, model: nn.Module, target_modules: list[str]) -> None:
-        """Replace target modules with adaptor layers and freeze the base model parameters."""
+    def insert_adapters(self, model: nn.Module, target_modules: list[str]) -> None:
+        """Replace target modules with adapter layers and freeze the base model parameters."""
         for module_path, module in model.named_modules():
             module_name = module_path.split('.')[-1]
 
             if module_name in target_modules:
                 assert isinstance(module, (nn.Linear, Conv1D)), 'Target module must be Linear or Conv1D'
 
-                adaptor_layer = MixtureOfLoRAsLayer(module, self.n_loras, self.r, self.alpha)
-                self.adaptor_layers.append(adaptor_layer)
+                adapter_layer = MixtureOfLoRAsLayer(module, self.n_loras, self.r, self.alpha)
+                self.adapter_layers.append(adapter_layer)
 
-                # Replace the target module with an adaptor layer
+                # Replace the target module with an adapter layer
                 parent_module_path = '.'.join(module_path.split('.')[:-1])
                 parent_module = model.get_submodule(parent_module_path)
-                setattr(parent_module, module_name, adaptor_layer)
+                setattr(parent_module, module_name, adapter_layer)
 
         # Freeze the base model parameters
         for param_path, param in model.named_parameters():
@@ -36,9 +36,9 @@ class MixtureOfLoRAsController:
                 param.requires_grad = False
 
     def update_lora_weights(self, lora_weights: torch.Tensor) -> None:
-        """Update example-specific LoRA weights for all adaptor layers."""
-        for adaptor_layer in self.adaptor_layers:
-            adaptor_layer.update_lora_weights(lora_weights)
+        """Update example-specific LoRA weights for all adapter layers."""
+        for adapter_layer in self.adapter_layers:
+            adapter_layer.update_lora_weights(lora_weights)
 
 
 class MixtureOfLoRAsLayer(nn.Linear):

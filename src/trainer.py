@@ -2,7 +2,6 @@ import os
 import time
 import random
 from collections import defaultdict
-from typing import List, Dict, Tuple, Optional, Union
 
 import numpy as np
 
@@ -16,7 +15,7 @@ from accelerate import Accelerator
 from tqdm import tqdm
 from omegaconf import DictConfig
 
-from adaptors import Controller
+from adapters import Controller
 from preference_dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
 from utils import formatted_dict, pad_to_length, log_main_process
 
@@ -134,7 +133,7 @@ class AccelerateTrainer:
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
 
-                grad_norm = self.clip_gradient()
+                grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
 
                 self.optimizer.step()
                 self.scheduler.step()
@@ -176,12 +175,12 @@ class AccelerateTrainer:
         log_main_process(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
 
         if self.example_counter > 0:
-            output_dir = os.path.join(self.config.local_run_dir, f'step-{self.example_counter}')
+            output_dir = os.path.join(self.config.run_dir, f'step-{self.example_counter}')
             log_main_process(f'creating checkpoint to write to {output_dir}...')
             if self.config.save:
                 self.save(output_dir, mean_eval_metrics)
 
-    def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
+    def get_batch_metrics(self, batch: dict[str, list | torch.Tensor], loss_config: DictConfig, train=True):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
 
         metrics = {}
@@ -193,7 +192,7 @@ class AccelerateTrainer:
             with torch.no_grad():
                 reference_chosen_logps, reference_rejected_logps = self.concatenated_forward(self.reference_model, batch)
 
-            losses, chosen_rewards, rejected_rewards = preference_loss(
+            losses, chosen_rewards, rejected_rewards = _compute_preference_losses(
                 policy_chosen_logps,
                 policy_rejected_logps,
                 reference_chosen_logps,
@@ -214,11 +213,6 @@ class AccelerateTrainer:
             policy_rejected_logps = self.accelerator.gather(policy_rejected_logps.detach())
             metrics[f'logps_{train_test}/rejected'] = policy_rejected_logps.cpu().numpy().tolist()
 
-        elif loss_config.name == 'sft':
-            policy_chosen_logits = self.policy(batch['chosen_input_ids'], attention_mask=batch['chosen_attention_mask']).logits.to(torch.float32)
-            policy_chosen_logps = _get_batch_logps(policy_chosen_logits, batch['chosen_labels'], average_log_prob=False)
-
-            losses = -policy_chosen_logps
         policy_chosen_logps = self.accelerator.gather(policy_chosen_logps.detach())
         metrics[f'logps_{train_test}/chosen'] = policy_chosen_logps.cpu().numpy().tolist()
         all_devices_losses = self.accelerator.gather(losses.detach())
@@ -226,7 +220,7 @@ class AccelerateTrainer:
 
         return losses.mean(), metrics
 
-    def concatenated_forward(self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
+    def concatenated_forward(self, model: nn.Module, batch: dict[str, list | torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
         
            We do this to avoid doing two forward passes, because it's faster for FSDP.
@@ -235,30 +229,12 @@ class AccelerateTrainer:
         concatenated_batch = concatenated_inputs(batch)
 
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
-        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
+        all_logps = _compute_response_logps(all_logits, concatenated_batch['concatenated_labels'])
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
 
-    def clip_gradient(self):
-        """Clip the gradient norm of the parameters of a non-FSDP policy."""
-        return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
-
-    def write_state_dict(self, step: int, state: Dict[str, torch.Tensor], metrics: Dict, filename: str, dir_name: Optional[str] = None):
-        """Write a checkpoint to disk."""
-        if dir_name is None:
-            dir_name = os.path.join(self.config.local_run_dir, f'LATEST')
-
-        os.makedirs(dir_name, exist_ok=True)
-        output_path = os.path.join(dir_name, filename)
-        log_main_process(f'writing checkpoint to {output_path}...')
-        torch.save({
-            'step': step,
-            'metrics': metrics if metrics is not None else {},
-            'state': state
-        }, output_path)
-
-    def save(self, output_dir: Optional[str] = None, metrics: Optional[Dict] = None):
+    def save(self, output_dir: str | None = None, metrics: dict | None = None):
         """Save policy, optimizer, and scheduler state to disk."""
 
         policy_state_dict = self.policy.state_dict()
@@ -272,8 +248,72 @@ class AccelerateTrainer:
         scheduler_state_dict = self.scheduler.state_dict()
         self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
 
+    def write_state_dict(self, step: int, state: dict[str, torch.Tensor], metrics: dict, filename: str, dir_name: str | None = None):
+        """Write a checkpoint to disk."""
+        if dir_name is None:
+            dir_name = os.path.join(self.config.run_dir, f'LATEST')
 
-def preference_loss(
+        os.makedirs(dir_name, exist_ok=True)
+        output_path = os.path.join(dir_name, filename)
+        log_main_process(f'writing checkpoint to {output_path}...')
+        torch.save({
+            'step': step,
+            'metrics': metrics if metrics is not None else {},
+            'state': state
+        }, output_path)
+
+
+def concatenated_inputs(batch: dict[str, list | torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Concatenate the chosen and rejected inputs into a single tensor.
+    
+    Args:
+        batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
+        
+    Returns:
+        A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
+    """
+    max_length = max(batch['chosen_input_ids'].shape[1], batch['rejected_input_ids'].shape[1])
+    concatenated_batch = {}
+    for k in batch:
+        if k.startswith('chosen') and isinstance(batch[k], torch.Tensor):
+            pad_value = -100 if 'labels' in k else 0
+            concatenated_key = k.replace('chosen', 'concatenated')
+            concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+    for k in batch:
+        if k.startswith('rejected') and isinstance(batch[k], torch.Tensor):
+            pad_value = -100 if 'labels' in k else 0
+            concatenated_key = k.replace('rejected', 'concatenated')
+            concatenated_batch[concatenated_key] = torch.cat((
+                concatenated_batch[concatenated_key],
+                pad_to_length(batch[k], max_length, pad_value=pad_value),
+            ), dim=0)
+
+    return concatenated_batch
+
+
+def _compute_response_logps(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Compute the log probability for each response indicated by the labels based on the logits.
+
+    Args:
+        logits: Unnormalized probabilities of the next tokens.
+            Shape: (batch_size, sequence_length, vocab_size)
+        labels: Vocabulary IDs of the response tokens. Prompt and padding tokens are labeled with -100.
+            Shape: (batch_size, sequence_length)
+    """
+    logits = logits[:, :-1, :]
+    labels = labels[:, 1:]
+
+    token_mask = labels != -100
+
+    logps = logits.log_softmax(dim=-1)
+    index = labels.masked_fill(~token_mask, 0).unsqueeze(dim=-1)
+    token_logps = torch.gather(logps, dim=-1, index=index).squeeze(dim=-1)
+
+    response_logps = token_logps.masked_fill_(~token_mask, 0.).sum(dim=-1)
+    return response_logps
+
+
+def _compute_preference_losses(
     policy_chosen_logps: torch.Tensor,
     policy_rejected_logps: torch.Tensor,
     reference_chosen_logps: torch.Tensor,
@@ -283,13 +323,18 @@ def preference_loss(
     beta: float,
     epsilon: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute the preference loss based on the log probabilities assigined by the policy and reference models.
+    """Compute the preference loss for each preference pair based on the log probabilities
+    evaluated by the policy and reference models.
 
     General Args:
-        policy_chosen_logps: Log probabilities of the chosen responses assigned by the policy model.
-        policy_rejected_logps: Log probabilities of the rejected responses assigned by the policy model.
-        reference_chosen_logps: Log probabilities of the chosen responses assigned by the reference model.
-        reference_rejected_logps: Log probabilities of the rejected responses assigned by the reference model.
+        policy_chosen_logps: Log probabilities of the chosen responses evaluated by the policy model.
+            Shape: (batch_size,)
+        policy_rejected_logps: Log probabilities of the rejected responses evaluated by the policy model.
+            Shape: (batch_size,)
+        reference_chosen_logps: Log probabilities of the chosen responses evaluated by the reference model.
+            Shape: (batch_size,)
+        reference_rejected_logps: Log probabilities of the rejected responses evaluated by the reference model.
+            Shape: (batch_size,)
         loss: The type of loss function for computing the preference loss.
         reference_free: If True, use a reference model that assigns equal probability to all responses instead.
         beta: Temperature, typically in the range of 0.1 to 0.5. The reference model is ignored as beta approaches 0.
@@ -319,63 +364,3 @@ def preference_loss(
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
 
     return losses, chosen_rewards, rejected_rewards
-
-
-def _get_batch_logps(
-    logits: torch.FloatTensor,
-    labels: torch.LongTensor,
-    average_log_prob: bool = False
-) -> torch.FloatTensor:
-    """Compute the log probabilities of the given labels under the given logits.
-
-    Args:
-        logits: Logits of the model (unnormalized). Shape: (batch_size, sequence_length, vocab_size)
-        labels: Labels for which to compute the log probabilities. Label tokens with a value of -100 are ignored. Shape: (batch_size, sequence_length)
-        average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
-
-    Returns:
-        A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
-    """
-    assert logits.shape[:-1] == labels.shape
-
-    labels = labels[:, 1:].clone()
-    logits = logits[:, :-1, :]
-    loss_mask = (labels != -100)
-
-    # dummy token; we'll ignore the losses on these tokens later
-    labels[labels == -100] = 0
-
-    per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
-
-    if average_log_prob:
-        return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
-    else:
-        return (per_token_logps * loss_mask).sum(-1)
-
-
-def concatenated_inputs(batch: Dict[str, Union[List, torch.LongTensor]]) -> Dict[str, torch.LongTensor]:
-    """Concatenate the chosen and rejected inputs into a single tensor.
-    
-    Args:
-        batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
-        
-    Returns:
-        A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
-    """
-    max_length = max(batch['chosen_input_ids'].shape[1], batch['rejected_input_ids'].shape[1])
-    concatenated_batch = {}
-    for k in batch:
-        if k.startswith('chosen') and isinstance(batch[k], torch.Tensor):
-            pad_value = -100 if 'labels' in k else 0
-            concatenated_key = k.replace('chosen', 'concatenated')
-            concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
-    for k in batch:
-        if k.startswith('rejected') and isinstance(batch[k], torch.Tensor):
-            pad_value = -100 if 'labels' in k else 0
-            concatenated_key = k.replace('rejected', 'concatenated')
-            concatenated_batch[concatenated_key] = torch.cat((
-                concatenated_batch[concatenated_key],
-                pad_to_length(batch[k], max_length, pad_value=pad_value),
-            ), dim=0)
-
-    return concatenated_batch
