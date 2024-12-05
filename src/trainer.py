@@ -52,8 +52,8 @@ class AccelerateTrainer:
             prepend_persona=config.prepend_persona
         )
         train_sampler = PreferenceSampler(
-            self.train_dataset,
-            shuffle=False,
+            dataset=self.train_dataset,
+            shuffle=True,
             seed=config.seed,
             n_epochs=config.n_epochs,
             n_examples=config.n_examples
@@ -73,16 +73,27 @@ class AccelerateTrainer:
             max_prompt_length=config.max_prompt_length,
             prepend_persona=config.prepend_persona
         )
-        eval_sampler = PreferenceSampler(
-            self.eval_dataset,
-            shuffle=False,
-            n_epochs=1,
-            n_examples=config.n_eval_examples
-        )
+        eval_sampler = PreferenceSampler(self.eval_dataset, shuffle=False, n_epochs=1)
         self.eval_iterator = DataLoader(
             self.eval_dataset,
             batch_size=config.eval_batch_size,
             sampler=eval_sampler,
+            collate_fn=get_collate_fn(self.tokenizer)
+        )
+
+        self.test_dataset = PreferenceDataset(
+            dataset=config.dataset,
+            split='test_unseen',
+            tokenizer=self.tokenizer,
+            max_length=config.max_length,
+            max_prompt_length=config.max_prompt_length,
+            prepend_persona=config.prepend_persona
+        )
+        test_sampler = PreferenceSampler(self.test_dataset, shuffle=False, n_epochs=1)
+        self.test_iterator = DataLoader(
+            self.eval_dataset,
+            batch_size=config.eval_batch_size,
+            sampler=test_sampler,
             collate_fn=get_collate_fn(self.tokenizer)
         )
 
@@ -98,6 +109,8 @@ class AccelerateTrainer:
             accelerator.prepare(self.policy, self.train_iterator, self.optimizer_non_loaded, self.scheduler)
         self.reference_model = accelerator.prepare_model(self.reference_model) if self.reference_model is not None else None
         self.eval_iterator = accelerator.prepare(self.eval_iterator)
+        self.test_iterator = accelerator.prepare(self.test_iterator)
+    
 
     def train(self):
         """Begin either SFT or DPO training, with periodic evaluation."""
@@ -173,6 +186,19 @@ class AccelerateTrainer:
 
         mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
         log_main_process(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
+
+        for eval_batch in tqdm(self.test_iterator, desc='Computing test metrics'):
+            local_eval_batch = eval_batch
+            with torch.no_grad():
+                _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
+
+            for k, v in eval_metrics.items():
+                all_eval_metrics[k].extend(v)
+
+        mean_test_metrics = {f'unseen_{k}': sum(v) / len(v) for k, v in all_eval_metrics.items()}
+        log_main_process(f'eval after {self.example_counter}: {formatted_dict(mean_test_metrics)}')
+
+        mean_eval_metrics.update(mean_test_metrics)
 
         if self.example_counter > 0:
             output_dir = os.path.join(self.config.run_dir, f'step-{self.example_counter}')

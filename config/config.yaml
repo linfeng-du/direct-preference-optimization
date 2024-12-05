@@ -19,17 +19,15 @@ save: true
 dataset: persona
 max_length: 512
 max_prompt_length: 256
-prepend_persona: true
+prepend_persona: ???
 
 n_epochs: 1
 n_examples: -1
-n_eval_examples: -1
 
 sample_during_eval: false
 n_eval_model_samples: 0
 do_first_eval: true
 
-# lr: 5e-2
 lr: 5e-5
 
 gradient_accumulation_steps: 1
