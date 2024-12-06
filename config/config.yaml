@@ -18,6 +18,7 @@ save: true
 
 dataset: persona
 prepend_persona: ???
+n_clusters: null
 max_length: 512
 max_prompt_length: 256
 

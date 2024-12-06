@@ -48,7 +48,8 @@ class AccelerateTrainer:
             tokenizer=self.tokenizer,
             max_length=config.max_length,
             max_prompt_length=config.max_prompt_length,
-            prepend_persona=config.prepend_persona
+            prepend_persona=config.prepend_persona,
+            n_clusters=config.n_clusters
         )
         train_sampler = PreferenceSampler(
             dataset=self.train_dataset,
@@ -70,7 +71,8 @@ class AccelerateTrainer:
             tokenizer=self.tokenizer,
             max_length=config.max_length,
             max_prompt_length=config.max_prompt_length,
-            prepend_persona=config.prepend_persona
+            prepend_persona=config.prepend_persona,
+            n_clusters=config.n_clusters
         )
         eval_sampler = PreferenceSampler(self.eval_dataset, shuffle=False, n_epochs=1)
         self.eval_iterator = DataLoader(
@@ -86,7 +88,8 @@ class AccelerateTrainer:
             tokenizer=self.tokenizer,
             max_length=config.max_length,
             max_prompt_length=config.max_prompt_length,
-            prepend_persona=config.prepend_persona
+            prepend_persona=config.prepend_persona,
+            n_clusters=config.n_clusters
         )
         test_sampler = PreferenceSampler(self.test_dataset, shuffle=False, n_epochs=1)
         self.test_iterator = DataLoader(
@@ -233,6 +236,9 @@ class AccelerateTrainer:
         """
         concatenated_batch = _concatenate_responses(batch)
 
+        if self.config.n_clusters is not None:
+            self.controller.update_lora_weights(concatenated_batch['proximities'])
+
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
         all_logps = _compute_response_logps(all_logits, concatenated_batch['concatenated_labels'])
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
@@ -284,6 +290,9 @@ def _concatenate_responses(batch: dict[str, list[str] | torch.Tensor]) -> dict[s
             pad_value = -100 if 'labels' in k else 0
             concatenated_key = k.replace('chosen', 'concatenated')
             concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+
+        if k == 'proximities':
+            concatenated_batch[k] = torch.cat([batch[k], batch[k]], dim=0)
 
     for k in batch:
         if k.startswith('rejected') and isinstance(batch[k], torch.Tensor):
