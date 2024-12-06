@@ -221,9 +221,9 @@ def _tokenize_example(
     prompt_length = len(prompt_tokens['input_ids'])
     chosen_length = len(chosen_tokens['input_ids'])
     rejected_length = len(rejected_tokens['input_ids'])
-    longer_response_length = max(chosen_length, rejected_length)
+    longer_length = max(chosen_length, rejected_length)
 
-    if prompt_length + longer_response_length > max_length:
+    if prompt_length + longer_length > max_length:
         if truncation_mode == 'keep_start':
             prompt_tokens = {k: v[:max_prompt_length] for k, v in prompt_tokens.items()}
         elif truncation_mode == 'keep_end':
@@ -234,7 +234,7 @@ def _tokenize_example(
     # If still too long, truncate the responses
     prompt_length = len(prompt_tokens['input_ids'])
 
-    if prompt_length + longer_response_length > max_length:
+    if prompt_length + longer_length > max_length:
         max_response_length = max_length - max_prompt_length
         chosen_tokens = {k: v[:max_response_length] for k, v in chosen_tokens.items()}
         rejected_tokens = {k: v[:max_response_length] for k, v in rejected_tokens.items()}
@@ -251,8 +251,6 @@ def _tokenize_example(
 
     example = {
         'prompt': prompt,
-        'chosen': prompt + chosen,
-        'rejected': prompt + rejected,
         'chosen_response_only': chosen,
         'rejected_response_only': rejected
     }

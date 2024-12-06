@@ -191,7 +191,6 @@ class AccelerateTrainer:
 
     def get_batch_metrics(self, batch: dict[str, list | torch.Tensor], loss_config: DictConfig, train=True):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
-
         metrics = {}
         train_test = 'train' if train else 'eval'
 
@@ -279,29 +278,42 @@ def _concatenate_responses(batch: dict[str, list[str] | torch.Tensor]) -> dict[s
     Duplicate any other tensors to match the doubled batch size.
 
     Args:
-        batch: A batch of data that contains the following fields:
-            {chosen/rejected}_input_ids
-            {chosen/rejected}_attention_mask
+        batch: A batch of examples that should contain the following fields:
+            chosen_input_ids: Token IDs of the prompt + chosen response
+                Shape: (batch_size, chosen_sequence_length)
+            chosen_attention_mask: Attention mask of the prompt + chosen response
+                Shape: (batch_size, chosen_sequence_length)
+            chosen_labels: Vocabulary IDs of the chosen response tokens
+                Shape: (batch_size, chosen_sequence_length)
+
+            rejected_input_ids: Token IDs of the prompt + rejected response
+                Shape: (batch_size, rejected_sequence_length)
+            rejected_attention_mask: Attention mask of the prompt + rejected response
+                Shape: (batch_size, rejected_sequence_length)
+            rejected_labels: Vocabulary IDs of the rejected response tokens
+                Shape: (batch_size, rejected_sequence_length)
     """
-    max_length = max(batch['chosen_input_ids'].shape[1], batch['rejected_input_ids'].shape[1])
+    chosen_length = batch['chosen_input_ids'].size(dim=-1)
+    rejected_length = batch['rejected_input_ids'].size(dim=-1)
+    longer_length = max(chosen_length, rejected_length)
+
     concatenated_batch = {}
-    for k in batch:
-        if k.startswith('chosen') and isinstance(batch[k], torch.Tensor):
-            pad_value = -100 if 'labels' in k else 0
-            concatenated_key = k.replace('chosen', 'concatenated')
-            concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+    for key in batch:
+        if not isinstance(batch[key], torch.Tensor):
+            continue
 
-        if k == 'proximities':
-            concatenated_batch[k] = torch.cat([batch[k], batch[k]], dim=0)
+        if key.startswith('chosen_'):
+            rejected_key = key.replace('chosen_', 'rejected_')
+            padding_value = -100 if 'labels' in key else 0
 
-    for k in batch:
-        if k.startswith('rejected') and isinstance(batch[k], torch.Tensor):
-            pad_value = -100 if 'labels' in k else 0
-            concatenated_key = k.replace('rejected', 'concatenated')
-            concatenated_batch[concatenated_key] = torch.cat((
-                concatenated_batch[concatenated_key],
-                pad_to_length(batch[k], max_length, pad_value=pad_value),
-            ), dim=0)
+            padded_chosen = pad_to_length(batch[key], longer_length, padding_value)
+            padded_rejected = pad_to_length(batch[rejected_key], longer_length, padding_value)
+
+            new_key = key.replace('chosen_', 'concatenated_')
+            new_value = torch.cat((padded_chosen, padded_rejected), dim=0)
+            concatenated_batch[new_key] = new_value
+        elif not key.startswith('rejected_'):
+            concatenated_batch[key] = torch.cat((batch[key], batch[key]), dim=0)
 
     return concatenated_batch
 

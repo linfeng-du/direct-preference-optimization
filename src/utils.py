@@ -10,10 +10,7 @@ import torch.nn as nn
 from accelerate import PartialState
 
 
-state = PartialState()
-
-
-@state.on_main_process
+@PartialState().on_main_process
 def log_main_process(message: str, level: str = 'info') -> None:
     """Log only on the main process."""
     # Get the caller module name
@@ -44,18 +41,6 @@ def disable_dropout(model: nn.Module) -> None:
     for module in model.modules():
         if isinstance(module, nn.Dropout):
             module.p = 0.
-
-
-def slice_and_move_batch_for_device(batch: dict, rank: int, world_size: int, device: str) -> dict:
-    """Slice a batch into chunks, and move each chunk to the specified device."""
-    if 'user_emb' in batch:
-        batch['user_emb'] = torch.tensor(batch['user_emb']).to(device)
-    chunk_size = len(list(batch.values())[0]) // world_size
-    start = chunk_size * rank
-    end = chunk_size * (rank + 1)
-    sliced = {k: v[start:end] for k, v in batch.items()}
-    on_device = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in sliced.items()}
-    return on_device
 
 
 def pad_to_length(tensor: torch.Tensor, length: int, pad_value: int | float, dim: int = -1) -> torch.Tensor:
