@@ -15,7 +15,7 @@ from tqdm import tqdm
 from omegaconf import DictConfig
 
 from adapters import Controller
-from preference_dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
+from dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
 from utils import formatted_dict, pad_to_length, log_main_process
 
 
@@ -231,8 +231,7 @@ class AccelerateTrainer:
         
            We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
-        #THIS HAS CHOSEN AND REJECTED SPERATED AND THIS JUST CONCATENATES THEM ACROSS THE ROWS SO 2BATCH_SIZE X SEQUENCE_LENGTH X HIDEN DIM
-        concatenated_batch = concatenated_inputs(batch)
+        concatenated_batch = _concatenate_responses(batch)
 
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
         all_logps = _compute_response_logps(all_logits, concatenated_batch['concatenated_labels'])
@@ -269,14 +268,14 @@ class AccelerateTrainer:
         }, output_path)
 
 
-def concatenated_inputs(batch: dict[str, list | torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Concatenate the chosen and rejected inputs into a single tensor.
-    
+def _concatenate_responses(batch: dict[str, list[str] | torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Concatenate the chosen and rejected responses along the batch dimension.
+    Duplicate any other tensors to match the doubled batch size.
+
     Args:
-        batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
-        
-    Returns:
-        A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
+        batch: A batch of data that contains the following fields:
+            {chosen/rejected}_input_ids
+            {chosen/rejected}_attention_mask
     """
     max_length = max(batch['chosen_input_ids'].shape[1], batch['rejected_input_ids'].shape[1])
     concatenated_batch = {}
@@ -285,6 +284,7 @@ def concatenated_inputs(batch: dict[str, list | torch.Tensor]) -> dict[str, torc
             pad_value = -100 if 'labels' in k else 0
             concatenated_key = k.replace('chosen', 'concatenated')
             concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+
     for k in batch:
         if k.startswith('rejected') and isinstance(batch[k], torch.Tensor):
             pad_value = -100 if 'labels' in k else 0

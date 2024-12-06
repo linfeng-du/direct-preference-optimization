@@ -1,17 +1,14 @@
 import random
 from typing import Any
-from collections import defaultdict
 from collections.abc import Callable, Iterator
 
-import datasets
 from transformers import PreTrainedTokenizerBase
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Sampler
 
-from tqdm import tqdm
-
+from preference_datasets import load_persona
 from utils import TemporarilySeededRandom, log_main_process
 
 
@@ -43,13 +40,13 @@ class PreferenceDataset(Dataset):
             indices = []
             for pair_idx, (chosen, rejected) in enumerate(pairs):
                 others = {}
-                for key, val in prompt_data.items():
-                    if isinstance(val, str):
+                for key, value in prompt_data.items():
+                    if isinstance(value, str):
                         # Prompt-level property
-                        others[key] = val
-                    elif isinstance(val, list):
+                        others[key] = value
+                    elif isinstance(value, list):
                         # Example-level property
-                        others[key] = val[pair_idx]
+                        others[key] = value[pair_idx]
 
                 indices.append(len(self.examples))
                 self.examples.append((
@@ -65,7 +62,7 @@ class PreferenceDataset(Dataset):
     def get_dataset_config(dataset: str) -> tuple[Callable, str]:
         """Get the loader and truncation mode of the dataset."""
         dataset_configs = {
-            'persona': {'loader': _load_persona, 'truncation_mode': 'keep_end'}
+            'persona': {'loader': load_persona, 'truncation_mode': 'keep_end'}
         }
         config = dataset_configs[dataset]
         return config['loader'], config['truncation_mode']
@@ -183,6 +180,8 @@ def get_collate_fn(
                 if 'prompt' in key:
                     # Flip them back to place the padding on the left side
                     padded_batch[key] = padded_batch[key].flip(dims=[1])
+            elif isinstance(batch[0][key], list):
+                padded_batch[key] = torch.tensor([e[key] for e in batch])
             else:
                 padded_batch[key] = [e[key] for e in batch]
 
@@ -215,7 +214,6 @@ def _tokenize_example(
 
     chosen_tokens['input_ids'].append(tokenizer.eos_token_id)
     chosen_tokens['attention_mask'].append(1)
-
     rejected_tokens['input_ids'].append(tokenizer.eos_token_id)
     rejected_tokens['attention_mask'].append(1)
 
@@ -248,7 +246,6 @@ def _tokenize_example(
     # Create labels
     chosen_tokens['labels'] = chosen_tokens['input_ids'][:]
     chosen_tokens['labels'][:prompt_length] = [-100] * prompt_length
-
     rejected_tokens['labels'] = rejected_tokens['input_ids'][:]
     rejected_tokens['labels'][:prompt_length] = [-100] * prompt_length
 
@@ -266,82 +263,7 @@ def _tokenize_example(
         'rejected': rejected_tokens
     }
     for category, tokens in categories.items():
-        for key, val in tokens.items():
-            example[f'{category}_{key}'] = val
+        for key, value in tokens.items():
+            example[f'{category}_{key}'] = value
 
     return example
-
-
-def _load_persona(
-    split: str,
-    prepend_persona: bool
-) -> dict[str, dict[str, list[str] | list[tuple[int, int]]]]:
-    """Load the PERSONA dataset from Huggingface and convert it to the necessary format.
-
-    The dataset is converted to a dictionary with the following structure:
-    {
-        'prompt1': {
-            'responses': list[str],
-            'pairs': list[tuple[int, int]],
-            'persona': list[str]
-        },
-        ...
-    }
-
-    Prompts should be structured as follows:
-        \n\nHuman: <prompt>\n\nAssistant:
-    """
-    def get_split_indices():
-        """Create train, test, and test_unseen splits for the PERSONA dataset.
-
-        The dataset contains 1,000 personas, each with 100 training and testing examples.
-        Randomly reserve 200 personas as the unseen test set.
-        """
-        if not hasattr(get_split_indices, '_splits'):
-            with TemporarilySeededRandom(seed=42):
-                unseen_personas = random.sample(range(1000), 200)
-                seen_personas = [p for p in range(1000) if p not in unseen_personas]
-
-            # For each persona, the first 100 examples are used for training,
-            # and the following 100 examples are used for testing
-            def get_example_indices(personas, start, end):
-                return [index for p in personas for index in range(p * 200 + start, p * 200 + end)]
-
-            train_indices = get_example_indices(seen_personas, start=0, end=100)
-            test_indices = get_example_indices(seen_personas, start=100, end=200)
-            test_unseen_indices = get_example_indices(unseen_personas, start=0, end=200)
-
-            get_split_indices._splits = {
-                'train': train_indices,
-                'test': test_indices,
-                'test_unseen': test_unseen_indices
-            }
-
-        return get_split_indices._splits[split]
-
-    log_main_process(f'Loading PERSONA dataset {split} split...')
-
-    dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
-    data = defaultdict(lambda: defaultdict(list))
-
-    for index in tqdm(get_split_indices(split), desc=f'Processing PERSONA {split} split'):
-        example = dataset[index]
-
-        prompt = example['instruction']
-        chosen = example['data']
-        rejected = example['original']
-        persona = example['persona']
-
-        if prepend_persona:
-            persona_row = ', '.join(persona.strip().split('\n'))
-            prompt = f'Here are your characteristics: {persona_row}. {prompt}'
-
-        prompt = f'\n\nHuman: {prompt}\n\nAssistant:'
-        responses = [f' {chosen}', f' {rejected}']
-        n_responses = len(data[prompt]['responses'])
-
-        data[prompt]['responses'].extend(responses)
-        data[prompt]['pairs'].append((n_responses, n_responses + 1))
-        data[prompt]['persona'].append(persona)
-
-    return data
