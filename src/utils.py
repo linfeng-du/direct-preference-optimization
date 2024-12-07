@@ -43,19 +43,9 @@ def disable_dropout(model: nn.Module) -> None:
             module.p = 0.
 
 
-def pad_to_length(tensor: torch.Tensor, length: int, pad_value: int | float, dim: int = -1) -> torch.Tensor:
-    if tensor.size(dim) >= length:
-        return tensor
-    else:
-        pad_size = list(tensor.shape)
-        pad_size[dim] = length - tensor.size(dim)
-        return torch.cat([tensor, pad_value * torch.ones(*pad_size, dtype=tensor.dtype, device=tensor.device)], dim=dim)
-
-
 class TemporarilySeededRandom:
     """Context manager for controlled randomness.
-
-    Sets the random seed and restores the original seed when exiting.
+    Set the random seed and restore the original random states when exiting.
     """
 
     def __init__(self, seed: int) -> None:

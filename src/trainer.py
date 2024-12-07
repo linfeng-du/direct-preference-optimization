@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 
 from adapters import Controller
 from dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
-from utils import formatted_dict, pad_to_length, log_main_process
+from utils import formatted_dict, log_main_process
 
 
 class AccelerateTrainer:
@@ -306,8 +306,18 @@ def _concatenate_responses(batch: dict[str, list[str] | torch.Tensor]) -> dict[s
             rejected_key = key.replace('chosen_', 'rejected_')
             padding_value = -100 if 'labels' in key else 0
 
-            padded_chosen = pad_to_length(batch[key], longer_length, padding_value)
-            padded_rejected = pad_to_length(batch[rejected_key], longer_length, padding_value)
+            padded_chosen = F.pad(
+                batch[key],
+                (0, longer_length - chosen_length),
+                mode='constant',
+                value=padding_value
+            )
+            padded_rejected = F.pad(
+                batch[rejected_key],
+                (0, longer_length - rejected_length),
+                mode='constant',
+                value=padding_value
+            )
 
             new_key = key.replace('chosen_', 'concatenated_')
             new_value = torch.cat((padded_chosen, padded_rejected), dim=0)
@@ -381,7 +391,8 @@ def _compute_preference_losses(
     if loss == 'dpo':
         # Eq. 3 of https://ericmitchell.ai/cdpo.pdf
         # epsilon = 0 gives the original DPO loss (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
-        losses = -(1 - epsilon) * F.logsigmoid(beta * logits) - epsilon * F.logsigmoid(-beta * logits)
+        losses = -(1 - epsilon) * F.logsigmoid(beta * logits) \
+                 - epsilon * F.logsigmoid(-beta * logits)
     elif loss == 'ipo':
         # Eq. 17 of https://arxiv.org/pdf/2310.12036
         losses = torch.square(logits - 1 / (2 * beta))
