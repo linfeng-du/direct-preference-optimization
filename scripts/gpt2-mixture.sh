@@ -1,5 +1,5 @@
 accelerate launch src/train.py \
-    exp_name=debug \
+    exp_name=gpt2-mixture \
     dataset=persona \
     dataset.prepend_persona=false \
     dataset.n_clusters=8 \
@@ -7,5 +7,5 @@ accelerate launch src/train.py \
     adapter=mixture_of_loras \
     adapter.n_loras=8 \
     adapter.r=2 \
-    n_examples=256 \
-    n_eval_examples=256
+    batch_size=8 \
+    eval_batch_size=32

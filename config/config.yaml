@@ -18,15 +18,13 @@ max_prompt_length: 256
 
 n_epochs: 1
 n_examples: -1
-batch_size: 16
+batch_size: ???
 
+eval_every: 19840
 n_eval_examples: -1
-eval_batch_size: 32
+eval_batch_size: ???
 
 lr: 5e-5
 optimizer: AdamW
 warmup_steps: 150
-
 max_grad_norm: 10.
-
-eval_every: 19840

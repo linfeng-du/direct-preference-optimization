@@ -1,5 +1,6 @@
 import os
 import random
+from time import perf_counter
 from collections import defaultdict
 
 import numpy as np
@@ -138,10 +139,20 @@ class AccelerateTrainer:
 
         for batch in tqdm(self.train_loader, desc='Training'):
             if self.n_examples_seen % self.config.eval_every == 0:
+                if self.n_examples_seen > 0:
+                    end_time = perf_counter()
+                    throughput = n_examples_seen / (end_time - start_time)
+                    log_main_process(f'Training throughput: {throughput} examples/s')
+
                 test_metrics = self.evaluate(self.test_loader, split='test')
                 test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
                 test_metrics.update(test_unseen_metrics)
-                self.save(f'step-{self.n_examples_seen}', test_metrics)
+
+                if self.n_examples_seen > 0:
+                    self.save(f'step-{self.n_examples_seen}', test_metrics)
+
+                start_time = perf_counter()
+                n_examples_seen = 0
 
             self.policy.train()
 
@@ -156,19 +167,20 @@ class AccelerateTrainer:
             self.optimizer.zero_grad()
 
             self.n_examples_seen += batch['chosen_input_ids'].size(dim=0)
+            n_examples_seen += batch['chosen_input_ids'].size(dim=0)
 
         test_metrics = self.evaluate(self.test_loader, split='test')
         test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
         test_metrics.update(test_unseen_metrics)
         self.save('LATEST', test_metrics)
 
+    @torch.no_grad()
     def evaluate(self, eval_loader, split):
         self.policy.eval()
         all_metrics = defaultdict(list)
 
-        for batch in tqdm(eval_loader, desc=f'Evaluating {split} split metrics'):
-            with torch.no_grad():
-                _, eval_metrics = self.compute_loss_and_metrics(batch, split)
+        for batch in tqdm(eval_loader, desc=f'Evaluating on {split} split'):
+            _, eval_metrics = self.compute_loss_and_metrics(batch, split)
 
             for key, value in eval_metrics.items():
                 all_metrics[key].extend(value)
@@ -250,19 +262,23 @@ class AccelerateTrainer:
     def save(self, version: str, metrics: dict) -> None:
         """Save the policy, optimizer, and scheduler states to disk."""
         output_dir = os.path.join(self.config.run_dir, version)
+        os.makedirs(output_dir, exist_ok=True)
         log_main_process(f'Writing checkpoints to {output_dir}...')
 
-        os.mkdir(output_dir)
-        torch.save(
-            {'step': self.n_examples_seen, 'metrics': metrics, 'state': self.policy.state_dict()},
+        self.accelerator.save(
+            {
+                'step': self.n_examples_seen,
+                'metrics': metrics,
+                'state': self.accelerator.unwrap_model(self.policy).state_dict()
+            },
             os.path.join(output_dir, 'policy.pt')
         )
-        torch.save(
-            {'step': self.n_examples_seen, 'state': self.optimizer.state_dict()},
+        self.accelerator.save(
+            {'state': self.optimizer.state_dict()},
             os.path.join(output_dir, 'optimizer.pt')
         )
-        torch.save(
-            {'step': self.n_examples_seen, 'state': self.scheduler.state_dict()},
+        self.accelerator.save(
+            {'state': self.scheduler.state_dict()},
             os.path.join(output_dir, 'scheduler.pt')
         )
 
