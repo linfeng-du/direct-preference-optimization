@@ -8,8 +8,8 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Sampler
 
-from preference_datasets import load_persona
-from utils import TemporarilySeededRandom, log_main_process
+from .persona import load_persona
+from .utils import TemporarilySeededRandom
 
 
 class PreferenceDataset(Dataset):
@@ -129,14 +129,12 @@ class PreferenceSampler(Sampler):
 
                     self.example_idx += 1
                     if self.example_idx == self.n_examples:
-                        log_main_process(f'Finished generating {self.n_examples} examples on {self.split} split')
                         self.epoch_idx = 0
                         self.example_idx = 0
                         return
 
             self.epoch_idx += 1
             if self.epoch_idx == self.n_epochs:
-                log_main_process(f'Finished generating {self.n_epochs} epochs on {self.split} split')
                 self.epoch_idx = 0
                 self.example_idx = 0
                 return

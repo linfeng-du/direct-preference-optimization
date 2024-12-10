@@ -1,6 +1,4 @@
 model: vicgalle/gpt2-open-instruct-v1
-
+target_modules: ['c_attn']
 policy_dtype: float32
 reference_dtype: float16
-
-target_modules: ['c_attn']

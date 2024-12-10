@@ -1,4 +1,4 @@
 adapter: mixture_of_loras
-n_loras: 8
-r: 2
-alpha: 32
+n_loras: ???
+r: ???
+alpha: 16

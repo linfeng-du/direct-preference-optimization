@@ -12,7 +12,7 @@ from sklearn.cluster import KMeans
 
 from tqdm import tqdm
 
-from utils import TemporarilySeededRandom, log_main_process
+from .utils import TemporarilySeededRandom
 
 
 def load_persona(
@@ -36,8 +36,6 @@ def load_persona(
     Prompts should be structured as follows:
         \n\nHuman: <prompt>\n\nAssistant:
     """
-    log_main_process(f'Loading PERSONA dataset {split} split...')
-
     dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
     data = defaultdict(lambda: defaultdict(list))
 
@@ -46,7 +44,7 @@ def load_persona(
     if n_clusters is not None:
         split_proximities = _get_cluster_proximities(dataset, split, n_clusters)
 
-    for split_idx, index in enumerate(tqdm(split_indices, desc=f'Processing {split} split')):
+    for split_idx, index in enumerate(tqdm(split_indices, desc=f'Processing PERSONA {split} split')):
         example = dataset[index]
 
         prompt = example['instruction']

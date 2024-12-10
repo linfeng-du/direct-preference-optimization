@@ -1,37 +1,32 @@
-defaults:
-  - _self_
-  - model: gpt2-instruct
-  - loss: dpo
-  - adapter: lora
-
 hydra:
   run:
     dir: ${run_dir}
 
-exp_name: debug
+exp_name: ???
 run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
 
-seed: 0
-batch_size: 16
-eval_batch_size: 32
-save: true
+defaults:
+  - _self_
+  - dataset: ???
+  - model: ???
+  - adapter: ???
+  - loss: dpo
 
-dataset: persona
-prepend_persona: ???
-n_clusters: null
+seed: 0
 max_length: 512
 max_prompt_length: 256
 
 n_epochs: 1
 n_examples: -1
+batch_size: 16
+
+n_eval_examples: -1
+eval_batch_size: 32
 
 lr: 5e-5
-
-gradient_accumulation_steps: 1
-max_grad_norm: 10.
-
 optimizer: AdamW
 warmup_steps: 150
-activation_checkpointing: false
+
+max_grad_norm: 10.
+
 eval_every: 19840
-minimum_log_interval_secs: 0.
