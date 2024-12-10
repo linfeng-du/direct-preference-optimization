@@ -142,7 +142,7 @@ class AccelerateTrainer:
                 if self.n_examples_seen > 0:
                     end_time = perf_counter()
                     throughput = n_examples_seen / (end_time - start_time)
-                    log_main_process(f'Training throughput: {throughput} examples/s')
+                    log_main_process(f'Training throughput: {throughput:.4g} examples/s')
 
                 test_metrics = self.evaluate(self.test_loader, split='test')
                 test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
