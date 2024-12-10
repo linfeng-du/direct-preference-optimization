@@ -7,5 +7,5 @@ accelerate launch src/train.py \
     adapter=mixture_of_loras \
     adapter.n_loras=8 \
     adapter.r=2 \
-    batch_size=8 \
-    eval_batch_size=64
+    batch_size=16 \
+    eval_batch_size=32
