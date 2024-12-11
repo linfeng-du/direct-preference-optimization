@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from accelerate import Accelerator
+from accelerate.utils import gather_object
 
 from tqdm import tqdm
 from omegaconf import DictConfig
@@ -29,9 +30,10 @@ class AccelerateTrainer:
         policy: nn.Module,
         controller: Controller,
         reference_model: nn.Module,
+        accelerator: Accelerator
     ):
         """Trainer that leverages Hugging Face Accelerate for distributed training."""
-        self.accelerator = Accelerator()
+        self.accelerator = accelerator
         log_all_processes(f'Creating trainer on process {self.accelerator.process_index} ' \
                           f'with world size {self.accelerator.num_processes}...')
 
@@ -135,13 +137,16 @@ class AccelerateTrainer:
         random.seed(self.config.seed)
 
         self.reference_model.eval()
-        self.n_examples_seen = 0
+        n_local_examples_seen = 0
+        n_local_examples_seen_tmp = None
 
         for batch in tqdm(self.train_loader, desc='Training'):
+            self.n_examples_seen = sum(gather_object([n_local_examples_seen]))
+
             if self.n_examples_seen % self.config.eval_every == 0:
                 if self.n_examples_seen > 0:
                     end_time = perf_counter()
-                    throughput = n_examples_seen / (end_time - start_time)
+                    throughput = n_local_examples_seen_tmp / (end_time - start_time)
                     log_main_process(f'Training throughput: {throughput:.4g} examples/s')
 
                 test_metrics = self.evaluate(self.test_loader, split='test')
@@ -152,7 +157,7 @@ class AccelerateTrainer:
                     self.save(f'step-{self.n_examples_seen}', test_metrics)
 
                 start_time = perf_counter()
-                n_examples_seen = 0
+                n_local_examples_seen_tmp = 0
 
             self.policy.train()
 
@@ -166,8 +171,8 @@ class AccelerateTrainer:
             self.scheduler.step()
             self.optimizer.zero_grad()
 
-            self.n_examples_seen += batch['chosen_input_ids'].size(dim=0)
-            n_examples_seen += batch['chosen_input_ids'].size(dim=0)
+            n_local_examples_seen += batch['chosen_input_ids'].size(dim=0)
+            n_local_examples_seen_tmp += batch['chosen_input_ids'].size(dim=0)
 
         test_metrics = self.evaluate(self.test_loader, split='test')
         test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')

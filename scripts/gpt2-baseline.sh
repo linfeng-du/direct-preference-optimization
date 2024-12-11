@@ -7,4 +7,5 @@ accelerate launch src/train.py \
     adapter=lora \
     adapter.r=16 \
     batch_size=16 \
+    eval_every=19840 \
     eval_batch_size=32

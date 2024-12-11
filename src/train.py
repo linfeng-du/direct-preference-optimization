@@ -3,25 +3,24 @@ import shutil
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
-from accelerate import PartialState
+from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
 
 import hydra
 from omegaconf import OmegaConf, DictConfig
+
+accelerator = Accelerator()
+torch.backends.cuda.matmul.allow_tf32 = True
 
 from adapters import get_controller
 from trainer import AccelerateTrainer
 from utils import log_main_process
 
 
-state = PartialState()
-torch.backends.cuda.matmul.allow_tf32 = True
-
-
 @hydra.main(version_base=None, config_path='../config', config_name='config')
 def main(config: DictConfig):
     """Main entry point for training. Validate config, initialize models, and kick off training."""
-    if state.is_main_process:
+    if accelerator.is_main_process:
         object_list = [config]
     else:
         shutil.rmtree(config.run_dir)
@@ -76,7 +75,7 @@ def main(config: DictConfig):
         if isinstance(module, nn.Dropout):
             module.p = 0.
 
-    trainer = AccelerateTrainer(config, policy, controller, reference_model)
+    trainer = AccelerateTrainer(config, policy, controller, reference_model, accelerator)
     trainer.train()
 
 
