@@ -46,5 +46,5 @@ config/
 ```
 
 ## Training
-`scripts` contains the all the bash scripts that we use to train our models.
+`scripts` contains all the bash scripts that we use to train our models.
 Arguments with the value of "???" in the configuration files must be specified in commend line.
