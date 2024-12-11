@@ -153,9 +153,6 @@ class AccelerateTrainer:
                 test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
                 test_metrics.update(test_unseen_metrics)
 
-                if self.n_examples_seen > 0:
-                    self.save(f'step-{self.n_examples_seen}', test_metrics)
-
                 start_time = perf_counter()
                 n_local_examples_seen_tmp = 0
 
