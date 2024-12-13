@@ -1,4 +1,5 @@
 import os
+import json
 import random
 from time import perf_counter
 from collections import defaultdict
@@ -178,7 +179,7 @@ class AccelerateTrainer:
         formatted_metrics = {key: f'{value:.5g}' for key, value in all_metrics.items()}
         log_accelerate(
             f'{split} split result after {self.example_count} training examples:\n'
-            f'{formatted_metrics}'
+            f'{json.dumps(formatted_metrics, indent=4)}'
         )
         return all_metrics
 
