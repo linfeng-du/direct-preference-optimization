@@ -214,12 +214,14 @@ class AccelerateTrainer:
         rejected_rewards = self.accelerator.gather(rejected_rewards)
         losses = self.accelerator.gather(losses)
 
+        logp_accuracies = (policy_chosen_logps > policy_rejected_logps).float()
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
         reward_margins = chosen_rewards - rejected_rewards
 
         metrics = {
             f'logp_{split}/chosen': policy_chosen_logps.tolist(),
             f'logp_{split}/rejected': policy_rejected_logps.tolist(),
+            f'logp_{split}/accuracy': logp_accuracies.tolist(),
             f'reward_{split}/chosen': chosen_rewards.tolist(),
             f'reward_{split}/rejected': rejected_rewards.tolist(),
             f'reward_{split}/accuracy': reward_accuracies.tolist(),
