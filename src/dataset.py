@@ -1,4 +1,3 @@
-import random
 from typing import Any
 from collections.abc import Callable, Iterator
 
@@ -8,8 +7,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Sampler
 
-from .persona import load_persona
-from .utils import TemporarilySeededRandom
+from preference_datasets import load_preference_dataset
 
 
 class PreferenceDataset(Dataset):
@@ -28,27 +26,19 @@ class PreferenceDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.max_prompt_length = max_prompt_length
-        loader, self.truncation_mode = self.get_dataset_config(dataset)
+        data, self.truncation_mode = load_preference_dataset(dataset, split, **loader_kwargs)
 
         self.examples = []
         self.grouped_indices = []
 
-        for prompt, prompt_data in loader(self.split, **loader_kwargs).items():
+        for prompt, prompt_data in data.items():
+            indices = []
             responses = prompt_data.pop('responses')
             pairs = prompt_data.pop('pairs')
 
-            indices = []
-            for pair_idx, (chosen, rejected) in enumerate(pairs):
-                others = {}
-                for key, value in prompt_data.items():
-                    if isinstance(value, str):
-                        # Prompt-level property
-                        others[key] = value
-                    elif isinstance(value, list):
-                        # Example-level property
-                        others[key] = value[pair_idx]
-
+            for idx, (chosen, rejected) in enumerate(pairs):
                 indices.append(len(self.examples))
+                others = {key: value[idx] for key, value in prompt_data.items()}
                 self.examples.append((
                     prompt,
                     responses[chosen],
@@ -57,15 +47,6 @@ class PreferenceDataset(Dataset):
                 ))
 
             self.grouped_indices.append(indices)
-
-    @staticmethod
-    def get_dataset_config(dataset: str) -> tuple[Callable, str]:
-        """Get the loader and truncation mode of the dataset."""
-        dataset_configs = {
-            'persona': {'loader': load_persona, 'truncation_mode': 'keep_end'}
-        }
-        config = dataset_configs[dataset]
-        return config['loader'], config['truncation_mode']
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -85,62 +66,73 @@ class PreferenceDataset(Dataset):
         return example
 
 
-class PreferenceSampler(Sampler):
+class PreferenceSampler(Sampler[int]):
 
     def __init__(
         self,
         dataset: PreferenceDataset,
         shuffle: bool,
         seed: int | None = None,
-        n_epochs: int = -1,
-        n_examples: int = -1
+        n_epochs: int | None = None,
+        n_examples: int | None = None
     ) -> None:
-        assert n_epochs > 0 or n_examples > 0, 'Must specify either n_epochs or n_examples'
+        assert n_epochs is not None or n_examples is not None, (
+            'Must specify either n_epochs or n_examples'
+        )
 
+        self.dataset = dataset
         self.shuffle = shuffle
-        self.seed = seed
         self.n_epochs = n_epochs
         self.n_examples = n_examples
 
-        self.split = dataset.split
-        self.grouped_indices = dataset.grouped_indices[:]
+        if self.shuffle:
+            self.generator = torch.Generator()
+            self.generator.manual_seed(seed)
 
-        epoch_examples = self.n_epochs * len(dataset)
-        if self.n_epochs == -1:
-            self.sampler_len = self.n_examples
-        elif self.n_examples == -1:
-            self.sampler_len = epoch_examples
-        else:
-            self.sampler_len = min(self.n_examples, epoch_examples)
+        self.epoch_count = None
+        self.example_count = None
 
-        self.epoch_idx = 0
-        self.example_idx = 0
+    @property
+    def num_samples(self) -> int:
+        if self.n_epochs is None:
+            return self.n_examples
+
+        epoch_examples = self.n_epochs * len(self.dataset)
+
+        if self.n_examples is None:
+            return epoch_examples
+
+        return min(epoch_examples, self.n_examples)
 
     def __iter__(self) -> Iterator[int]:
-        while True:
-            if self.shuffle:
-                with TemporarilySeededRandom(self.seed):
-                    random.shuffle(self.grouped_indices)
-                    self.seed = random.randint(a=0, b=2**32)
+        self.epoch_count = 0
+        self.example_count = 0
 
-            for indices in self.grouped_indices:
-                for index in indices:
+        while True:
+            n_groups = len(self.dataset.grouped_indices)
+            if self.shuffle:
+                group_indices = torch.randperm(n_groups, generator=self.generator).tolist()
+            else:
+                group_indices = list(range(n_groups))
+
+            for group_index in group_indices:
+                for index in self.dataset.grouped_indices[group_index]:
                     yield index
 
-                    self.example_idx += 1
-                    if self.example_idx == self.n_examples:
-                        self.epoch_idx = 0
-                        self.example_idx = 0
+                    self.example_count += 1
+                    if self.n_examples is not None and self.example_count == self.n_examples:
+                        self.epoch_count = 0
+                        self.example_count = 0
                         return
 
-            self.epoch_idx += 1
-            if self.epoch_idx == self.n_epochs:
-                self.epoch_idx = 0
-                self.example_idx = 0
+            self.epoch_count += 1
+            if self.n_epochs is not None and self.epoch_count == self.n_epochs:
+                self.epoch_count = 0
+                self.example_count = 0
                 return
 
     def __len__(self) -> int:
-        return self.sampler_len
+        return self.num_samples
 
 
 def get_collate_fn(
@@ -175,6 +167,7 @@ def get_collate_fn(
                     padding_value=padding_value,
                     padding_side='right'
                 )
+
                 if 'prompt' in key:
                     # Flip them back to place the padding on the left side
                     padded_batch[key] = padded_batch[key].flip(dims=[1])

@@ -1,9 +1,9 @@
+exp_name: ???
+run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
+
 hydra:
   run:
     dir: ${run_dir}
-
-exp_name: ???
-run_dir: ./outputs/${exp_name}/${now:%Y-%m-%d_%H-%M-%S_%f}
 
 defaults:
   - _self_
@@ -13,15 +13,16 @@ defaults:
   - loss: dpo
 
 seed: 0
+
 max_length: 512
 max_prompt_length: 256
 
 n_epochs: 1
-n_examples: -1
+n_examples: null
 batch_size: ???
 
-eval_every: 19840
-n_eval_examples: -1
+eval_every: ???
+n_eval_examples: null
 eval_batch_size: ???
 
 lr: 5e-5

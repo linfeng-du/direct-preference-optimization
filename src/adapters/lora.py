@@ -20,19 +20,21 @@ class LoRAController:
             module_name = module_path.split('.')[-1]
 
             if module_name in target_modules:
-                assert isinstance(module, (nn.Linear, Conv1D)), 'Target module must be Linear or Conv1D'
+                assert isinstance(module, (nn.Linear, Conv1D)), (
+                    'Target module must be Linear or Conv1D'
+                )
 
                 adapter_layer = LoRALayer(module, self.r, self.alpha)
                 self.adapter_layers.append(adapter_layer)
 
-                # Replace the target module with an adapter layer
+                # Replace the target module with the adapter layer
                 parent_module_path = '.'.join(module_path.split('.')[:-1])
                 parent_module = model.get_submodule(parent_module_path)
                 setattr(parent_module, module_name, adapter_layer)
 
         # Freeze the base model parameters
         for param_path, param in model.named_parameters():
-            if 'lora_A' not in param_path and 'lora_B' not in param_path:
+            if not param_path.endswith(('.lora_A', '.lora_B')):
                 param.requires_grad = False
 
 
@@ -55,14 +57,15 @@ class LoRALayer(nn.Linear):
 
         self.weight = weight
         self.bias = bias
-        self.lora_A = nn.Parameter(self.weight.new_zeros(r, in_features))
-        self.lora_B = nn.Parameter(self.weight.new_zeros(out_features, r))
+        self.lora_A = nn.Parameter(self.weight.new_empty(r, in_features))
+        self.lora_B = nn.Parameter(self.weight.new_empty(out_features, r))
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        if hasattr(self, 'lora_A'):
+        if hasattr(self, 'lora_A') and hasattr(self, 'lora_B'):
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         delta_w = self.lora_B @ self.lora_A * self.scaling

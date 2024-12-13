@@ -6,6 +6,6 @@ accelerate launch src/train.py \
     model=llama1B-instruct \
     adapter=lora \
     adapter.r=16 \
-    batch_size=16 \
-    eval_every=39680 \
-    eval_batch_size=32
+    batch_size=4 \
+    eval_every=40000 \
+    eval_batch_size=8

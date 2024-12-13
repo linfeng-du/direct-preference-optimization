@@ -17,9 +17,9 @@ from accelerate.utils import gather_object
 from tqdm import tqdm
 from omegaconf import DictConfig
 
-from adapters import Controller
-from preference_datasets import PreferenceDataset, PreferenceSampler, get_collate_fn
-from utils import log_main_process, log_all_processes
+from adapters import LoRAController, MixtureOfLoRAsController
+from dataset import PreferenceDataset, PreferenceSampler, get_collate_fn
+from utils import log_accelerate
 
 
 class AccelerateTrainer:
@@ -28,99 +28,35 @@ class AccelerateTrainer:
         self,
         config: DictConfig,
         policy: nn.Module,
-        controller: Controller,
+        controller: LoRAController | MixtureOfLoRAsController,
         reference_model: nn.Module,
         accelerator: Accelerator
     ):
         """Trainer that leverages Hugging Face Accelerate for distributed training."""
-        self.accelerator = accelerator
-        log_all_processes(f'Creating trainer on process {self.accelerator.process_index} ' \
-                          f'with world size {self.accelerator.num_processes}...')
-
         self.config = config
         self.controller = controller
-        self.n_examples_seen = None
+        self.accelerator = accelerator
 
-        log_main_process('Loading tokenizer...')
-        tokenizer = AutoTokenizer.from_pretrained(self.config.model.model)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
+        self.example_count = None
 
-        log_main_process('Loading dataset...')
-        train_dataset = PreferenceDataset(
-            split='train',
-            tokenizer=tokenizer,
-            max_length=self.config.max_length,
-            max_prompt_length=self.config.max_prompt_length,
-            **self.config.dataset
-        )
-        train_loader = DataLoader(
-            dataset=train_dataset,
-            batch_size=self.config.batch_size,
-            sampler=PreferenceSampler(
-                dataset=train_dataset,
-                shuffle=True,
-                seed=self.config.seed,
-                n_epochs=self.config.n_epochs,
-                n_examples=self.config.n_examples
-            ),
-            collate_fn=get_collate_fn(tokenizer)
-        )
-
-        test_dataset = PreferenceDataset(
-            split='test',
-            tokenizer=tokenizer,
-            max_length=self.config.max_length,
-            max_prompt_length=self.config.max_prompt_length,
-            **self.config.dataset
-        )
-        test_loader = DataLoader(
-            dataset=test_dataset,
-            batch_size=self.config.eval_batch_size,
-            sampler=PreferenceSampler(
-                dataset=test_dataset,
-                shuffle=False,
-                n_epochs=1,
-                n_examples=self.config.n_eval_examples
-            ),
-            collate_fn=get_collate_fn(tokenizer)
-        )
-
-        test_unseen_dataset = PreferenceDataset(
-            split='test_unseen',
-            tokenizer=tokenizer,
-            max_length=self.config.max_length,
-            max_prompt_length=self.config.max_prompt_length,
-            **self.config.dataset
-        )
-        test_unseen_loader = DataLoader(
-            dataset=test_unseen_dataset,
-            batch_size=self.config.eval_batch_size,
-            sampler=PreferenceSampler(
-                dataset=test_unseen_dataset,
-                shuffle=False,
-                n_epochs=1,
-                n_examples=self.config.n_eval_examples
-            ),
-            collate_fn=get_collate_fn(tokenizer)
-        )
-
+        train_loader, test_loader, test_unseen_loader = self._load_dataset()
         optimizer = getattr(optim, self.config.optimizer)(
-            params=[p for p in policy.parameters() if p.requires_grad],
+            [p for p in policy.parameters() if p.requires_grad],
             lr=self.config.lr
         )
         scheduler = optim.lr_scheduler.LambdaLR(
-            optimizer=optimizer,
-            lr_lambda=lambda step: min(1., (step + 1) / (self.config.warmup_steps + 1))
+            optimizer,
+            lambda step: min(1., (step + 1) / (self.config.warmup_steps + 1))
         )
-
-        self.policy, \
-        self.reference_model, \
-        self.train_loader, \
-        self.test_loader, \
-        self.test_unseen_loader, \
-        self.optimizer, \
-        self.scheduler = self.accelerator.prepare(
+        (
+            self.policy,
+            self.reference_model,
+            self.train_loader,
+            self.test_loader,
+            self.test_unseen_loader,
+            self.optimizer,
+            self.scheduler
+        ) = self.accelerator.prepare(
             policy,
             reference_model,
             train_loader,
@@ -130,6 +66,50 @@ class AccelerateTrainer:
             scheduler
         )
 
+    def _load_dataset(self):
+        tokenizer = AutoTokenizer.from_pretrained(self.config.model.model)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        dataset_kwargs = {
+            'tokenizer': tokenizer,
+            'max_length': self.config.max_length,
+            'max_prompt_length': self.config.max_prompt_length,
+            **self.config.dataset
+        }
+        sampler_kwargs = {
+            'shuffle': True,
+            'seed': self.config.seed,
+            'n_epochs': self.config.n_epochs,
+            'n_examples': self.config.n_examples
+        }
+        loader_kwargs = {
+            'batch_size': self.config.batch_size,
+            'collate_fn': get_collate_fn(tokenizer)
+        }
+
+        train_dataset = PreferenceDataset(split='train', **dataset_kwargs)
+        train_sampler = PreferenceSampler(train_dataset, **sampler_kwargs)
+        train_loader = DataLoader(train_dataset, sampler=train_sampler, **loader_kwargs)
+
+        sampler_kwargs.pop('seed')
+        sampler_kwargs.update({
+            'shuffle': False,
+            'n_epochs': 1,
+            'n_examples': self.config.n_eval_examples
+        })
+        loader_kwargs.update({'batch_size': self.config.eval_batch_size})
+
+        test_dataset = PreferenceDataset(split='test', **dataset_kwargs)
+        test_sampler = PreferenceSampler(test_dataset, **sampler_kwargs)
+        test_loader = DataLoader(test_dataset, sampler=test_sampler, **loader_kwargs)
+
+        test_unseen_dataset = PreferenceDataset(split='test_unseen', **dataset_kwargs)
+        test_unseen_sampler = PreferenceSampler(test_unseen_dataset, **sampler_kwargs)
+        test_unseen_loader = DataLoader(test_unseen_dataset, sampler=test_unseen_sampler, **loader_kwargs)
+
+        return train_loader, test_loader, test_unseen_loader
+
     def train(self):
         """Begin preference training with periodic evaluation."""
         torch.manual_seed(self.config.seed)
@@ -137,28 +117,28 @@ class AccelerateTrainer:
         random.seed(self.config.seed)
 
         self.reference_model.eval()
-        n_local_examples_seen = 0
-        n_local_examples_seen_tmp = None
+        local_example_count = 0
+        local_example_count_train = None
 
         for batch in tqdm(self.train_loader, desc='Training'):
-            self.n_examples_seen = sum(gather_object([n_local_examples_seen]))
+            self.example_count = sum(gather_object([local_example_count]))
 
-            if self.n_examples_seen % self.config.eval_every == 0:
-                if self.n_examples_seen > 0:
+            if self.example_count % self.config.eval_every == 0:
+                if self.example_count > 0:
                     end_time = perf_counter()
-                    throughput = n_local_examples_seen_tmp / (end_time - start_time)
-                    log_main_process(f'Training throughput: {throughput:.4g} examples/s')
+                    throughput = local_example_count_train / (end_time - start_time)
+                    log_accelerate(f'Training throughput: {throughput:.4g} examples/s')
 
                 test_metrics = self.evaluate(self.test_loader, split='test')
                 test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
                 test_metrics.update(test_unseen_metrics)
 
                 start_time = perf_counter()
-                n_local_examples_seen_tmp = 0
+                local_example_count_train = 0
 
             self.policy.train()
 
-            loss, _ = self.compute_loss_and_metrics(batch, split='train')
+            loss, _ = self._compute_loss_and_metrics(batch, split='train')
             self.accelerator.backward(loss)
 
             if self.accelerator.sync_gradients:
@@ -168,8 +148,8 @@ class AccelerateTrainer:
             self.scheduler.step()
             self.optimizer.zero_grad()
 
-            n_local_examples_seen += batch['chosen_input_ids'].size(dim=0)
-            n_local_examples_seen_tmp += batch['chosen_input_ids'].size(dim=0)
+            local_example_count += batch['prompt_input_ids'].size(dim=0)
+            local_example_count_train += batch['prompt_input_ids'].size(dim=0)
 
         test_metrics = self.evaluate(self.test_loader, split='test')
         test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
@@ -179,32 +159,41 @@ class AccelerateTrainer:
     @torch.no_grad()
     def evaluate(self, eval_loader, split):
         self.policy.eval()
+        local_example_count = 0
+        start_time = perf_counter()
         all_metrics = defaultdict(list)
 
         for batch in tqdm(eval_loader, desc=f'Evaluating on {split} split'):
-            _, eval_metrics = self.compute_loss_and_metrics(batch, split)
+            _, eval_metrics = self._compute_loss_and_metrics(batch, split)
+            local_example_count += batch['prompt_input_ids'].size(dim=0)
 
             for key, value in eval_metrics.items():
                 all_metrics[key].extend(value)
 
+        end_time = perf_counter()
+        throughput = local_example_count / (end_time - start_time)
+        log_accelerate(f'Inference throughput: {throughput:.4g} examples/s')
+
         all_metrics = {key: sum(value) / len(value) for key, value in all_metrics.items()}
         formatted_metrics = {key: f'{value:.5g}' for key, value in all_metrics.items()}
-        log_main_process(f'{split} split result after {self.n_examples_seen} training examples:\n'
-                         f'{formatted_metrics}')
+        log_accelerate(
+            f'{split} split result after {self.example_count} training examples:\n'
+            f'{formatted_metrics}'
+        )
         return all_metrics
 
-    def compute_loss_and_metrics(
+    def _compute_loss_and_metrics(
         self,
         batch: dict[str, list[str] | torch.Tensor],
         split: str
     ) -> tuple[torch.Tensor, dict[str, list[float]]]:
         """Compute the preference loss and other metrics for the batch of examples."""
         policy_chosen_logps, policy_rejected_logps = \
-            self.forward_concatenated_responses(self.policy, batch)
+            self._forward_concatenated_responses(self.policy, batch)
 
         with torch.no_grad():
             reference_chosen_logps, reference_rejected_logps = \
-                self.forward_concatenated_responses(self.reference_model, batch)
+                self._forward_concatenated_responses(self.reference_model, batch)
 
         losses, chosen_rewards, rejected_rewards = _compute_preference_losses_and_rewards(
             policy_chosen_logps,
@@ -225,7 +214,7 @@ class AccelerateTrainer:
         rejected_rewards = self.accelerator.gather(rejected_rewards)
         losses = self.accelerator.gather(losses)
 
-        reward_accuracies = (policy_chosen_logps > policy_rejected_logps).float()
+        reward_accuracies = (chosen_rewards > rejected_rewards).float()
         reward_margins = chosen_rewards - rejected_rewards
 
         metrics = {
@@ -239,7 +228,7 @@ class AccelerateTrainer:
         }
         return loss, metrics
 
-    def forward_concatenated_responses(
+    def _forward_concatenated_responses(
         self,
         model: nn.Module,
         batch: dict[str, list[str] | torch.Tensor]
@@ -256,20 +245,19 @@ class AccelerateTrainer:
         ).logits.to(torch.float32)
         logps = _compute_response_logps(logits, concatenated_batch['concatenated_labels'])
 
-        batch_size = batch['chosen_input_ids'].size(dim=0)
-        chosen_logps = logps[:batch_size]
-        rejected_logps = logps[batch_size:]
+        chosen_logps = logps[:batch['chosen_input_ids'].size(dim=0)]
+        rejected_logps = logps[batch['chosen_input_ids'].size(dim=0):]
         return chosen_logps, rejected_logps
 
     def save(self, version: str, metrics: dict) -> None:
         """Save the policy, optimizer, and scheduler states to disk."""
         output_dir = os.path.join(self.config.run_dir, version)
         os.makedirs(output_dir, exist_ok=True)
-        log_main_process(f'Writing checkpoints to {output_dir}...')
+        log_accelerate(f'Writing checkpoints to {output_dir}...')
 
         self.accelerator.save(
             {
-                'step': self.n_examples_seen,
+                'step': self.example_count,
                 'metrics': metrics,
                 'state': self.accelerator.unwrap_model(self.policy).state_dict()
             },
@@ -354,10 +342,10 @@ def _compute_response_logps(logits: torch.Tensor, labels: torch.Tensor) -> torch
     token_mask = labels != -100
 
     logps = logits.log_softmax(dim=-1)
-    index = labels.masked_fill(~token_mask, 0).unsqueeze(dim=-1)
+    index = labels.masked_fill(~token_mask, value=0).unsqueeze(dim=-1)
     token_logps = torch.gather(logps, dim=-1, index=index).squeeze(dim=-1)
 
-    response_logps = token_logps.masked_fill_(~token_mask, 0.).sum(dim=-1)
+    response_logps = token_logps.masked_fill_(~token_mask, value=0.).sum(dim=-1)
     return response_logps
 
 
@@ -403,8 +391,7 @@ def _compute_preference_losses_and_rewards(
     if loss == 'dpo':
         # Eq. 3 of https://ericmitchell.ai/cdpo.pdf
         # epsilon = 0 gives the original DPO loss (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
-        losses = -(1 - epsilon) * F.logsigmoid(beta * logits) \
-                 - epsilon * F.logsigmoid(-beta * logits)
+        losses = -(1 - epsilon) * F.logsigmoid(beta * logits) - epsilon * F.logsigmoid(-beta * logits)
     elif loss == 'ipo':
         # Eq. 17 of https://arxiv.org/pdf/2310.12036
         losses = torch.square(logits - 1 / (2 * beta))

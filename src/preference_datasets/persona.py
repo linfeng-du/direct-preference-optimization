@@ -1,8 +1,7 @@
 import random
 from collections import defaultdict
 
-import datasets
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 import numpy as np
 import scipy.sparse
@@ -12,15 +11,11 @@ from sklearn.cluster import KMeans
 
 from tqdm import tqdm
 
-from .utils import TemporarilySeededRandom
 
-
-def load_persona(
-    split: str,
-    prepend_persona: bool,
-    n_clusters: int | None = None
-) -> dict[str, dict[str, list[str] | list[tuple[int, int]]]]:
-    """Load the PERSONA dataset from Huggingface and convert it to the necessary format.
+def load_persona(split: str, prepend_persona: bool, n_clusters: int | None = None) -> (
+    dict[str, dict[str, list[str] | list[float] | list[tuple[int, int]]]]
+):
+    """Load the PERSONA dataset from Hugging Face and convert it to the necessary format.
 
     The dataset is converted to a dictionary with the following structure:
     {
@@ -33,18 +28,18 @@ def load_persona(
         ...
     }
 
-    Prompts should be structured as follows:
+    Prompts are structured as follows:
         \n\nHuman: <prompt>\n\nAssistant:
     """
-    dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
+    dataset = load_dataset('SynthLabsAI/PERSONA', split='train')
     data = defaultdict(lambda: defaultdict(list))
 
-    split_indices = _get_split_indices(split)
-
     if n_clusters is not None:
-        split_proximities = _get_cluster_proximities(dataset, split, n_clusters)
+        split_proximities = _get_split_proximities(dataset, split, n_clusters)
 
-    for split_idx, index in enumerate(tqdm(split_indices, desc=f'Processing PERSONA {split} split')):
+    for idx, index in enumerate(
+        tqdm(_get_split_indices(split), desc=f'Processing PERSONA {split} split')
+    ):
         example = dataset[index]
 
         prompt = example['instruction']
@@ -65,7 +60,7 @@ def load_persona(
         data[prompt]['persona'].append(persona)
 
         if n_clusters is not None:
-            proximities = split_proximities[split_idx]
+            proximities = split_proximities[idx]
             data[prompt]['proximities'].append(proximities)
 
     return data
@@ -77,9 +72,8 @@ def _get_split_indices(split: str) -> list[int]:
         # Create train, test, and test_unseen splits for the PERSONA dataset
         # The dataset contains 1,000 personas, each with 100 training and testing examples
         # Randomly reserve 200 personas as the unseen test set
-        with TemporarilySeededRandom(seed=42):
-            unseen_personas = random.sample(range(1000), 200)
-            seen_personas = [p for p in range(1000) if p not in unseen_personas]
+        unseen_personas = random.Random(x=42).sample(range(1000), k=200)
+        seen_personas = [p for p in range(1000) if p not in unseen_personas]
 
         # For each persona, the first 100 examples are used for training,
         # and the following 100 examples are used for testing
@@ -99,14 +93,13 @@ def _get_split_indices(split: str) -> list[int]:
     return _get_split_indices._splits[split]
 
 
-def _get_cluster_proximities(dataset: Dataset, split: str, n_clusters: int) -> list[list[float]]:
+def _get_split_proximities(dataset: Dataset, split: str, n_clusters: int) -> list[list[float]]:
     """Get the cluster proximities of examples from the specified split of the PERSONA dataset."""
-
-    if not hasattr(_get_cluster_proximities, '_splits'):
+    if not hasattr(_get_split_proximities, '_splits'):
         encoder = OneHotEncoder(handle_unknown='ignore')
         kmeans = KMeans(n_clusters, n_init='auto', random_state=42)
 
-        def compute_cluster_proximities(split):
+        def compute_split_proximities(split):
             raw_features = np.array([
                 _extract_raw_features(dataset[index]['persona'])
                 for index in _get_split_indices(split)
@@ -127,16 +120,16 @@ def _get_cluster_proximities(dataset: Dataset, split: str, n_clusters: int) -> l
             proximities = scipy.special.softmax(-np.log(distances), axis=-1)
             return proximities.tolist()
 
-        _get_cluster_proximities._splits = {
-            'train': compute_cluster_proximities(split='train'),
-            'test': compute_cluster_proximities(split='test'),
-            'test_unseen': compute_cluster_proximities(split='test_unseen')
+        _get_split_proximities._splits = {
+            'train': compute_split_proximities(split='train'),
+            'test': compute_split_proximities(split='test'),
+            'test_unseen': compute_split_proximities(split='test_unseen')
         }
 
-    return _get_cluster_proximities._splits[split]
+    return _get_split_proximities._splits[split]
 
 
-def _extract_raw_features(persona: str) -> list[int | str]:
+def _extract_raw_features(persona: str) -> list[str | int]:
     """Extract raw features from the persona."""
     feature_set = {
         'age', 'sex', 'race', 'ancestry', 'place of birth', 'citizenship',
