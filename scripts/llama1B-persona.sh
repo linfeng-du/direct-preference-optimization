@@ -1,5 +1,5 @@
 accelerate launch src/train.py \
-    exp_name=llama-persona \
+    exp_name=llama1B-persona \
     dataset=persona \
     dataset.prepend_persona=true \
     model=llama1B-instruct \

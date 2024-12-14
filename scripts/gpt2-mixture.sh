@@ -9,10 +9,11 @@ done
 r=$((16 / $n_clusters))
 
 accelerate launch src/train.py \
-    exp_name=gpt2-mixture/n_clusters=$n_clusters-sparse_proximities=$sparse_proximities \
+    exp_name=gpt2-mixture/n_clusters_$n_clusters-sparse_proximities_$sparse_proximities \
     dataset=persona \
     dataset.prepend_persona=false \
     dataset.n_clusters=$n_clusters \
+    dataset.sparse_proximities=$sparse_proximities \
     model=gpt2-instruct \
     adapter=mixture_of_loras \
     adapter.n_loras=$n_clusters \

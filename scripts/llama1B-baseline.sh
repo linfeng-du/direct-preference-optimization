@@ -1,5 +1,5 @@
 accelerate launch src/train.py \
-    exp_name=llama-baseline \
+    exp_name=llama1B-baseline \
     dataset=persona \
     model=llama1B-instruct \
     adapter=lora \
