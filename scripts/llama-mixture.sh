@@ -1,5 +1,15 @@
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --n_clusters) n_clusters="$2"; shift ;;
+        --sparse_proximities) sparse_proximities="$2"; shift ;;
+    esac
+    shift
+done
+
+r=$((16 / $n_clusters))
+
 accelerate launch src/train.py \
-    exp_name=llama-mixture \
+    exp_name=llama-mixture/n_clusters=$n_clusters-sparse_proximities=$sparse_proximities \
     dataset=persona \
     dataset.prepend_persona=false \
     dataset.n_clusters=8 \

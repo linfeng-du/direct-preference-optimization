@@ -86,8 +86,7 @@ class PreferenceSampler(Sampler[int]):
         self.n_examples = n_examples
 
         if self.shuffle:
-            self.generator = torch.Generator()
-            self.generator.manual_seed(seed)
+            self.generator = torch.Generator().manual_seed(seed)
 
         self.epoch_count = None
         self.example_count = None

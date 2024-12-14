@@ -1,7 +1,7 @@
 import random
 from collections import defaultdict
 
-from datasets import Dataset, load_dataset
+import datasets
 
 import numpy as np
 import scipy.sparse
@@ -12,9 +12,12 @@ from sklearn.cluster import KMeans
 from tqdm import tqdm
 
 
-def load_persona(split: str, prepend_persona: bool, n_clusters: int | None = None) -> (
-    dict[str, dict[str, list[str] | list[float] | list[tuple[int, int]]]]
-):
+def load_persona(
+    split: str,
+    prepend_persona: bool,
+    n_clusters: int | None = None,
+    sparse_proximities: bool | None = None
+) -> dict[str, dict[str, list[str] | list[float] | list[tuple[int, int]]]]:
     """Load the PERSONA dataset from Hugging Face and convert it to the necessary format.
 
     The dataset is converted to a dictionary with the following structure:
@@ -31,11 +34,11 @@ def load_persona(split: str, prepend_persona: bool, n_clusters: int | None = Non
     Prompts are structured as follows:
         \n\nHuman: <prompt>\n\nAssistant:
     """
-    dataset = load_dataset('SynthLabsAI/PERSONA', split='train')
+    dataset = datasets.load_dataset('SynthLabsAI/PERSONA', split='train')
     data = defaultdict(lambda: defaultdict(list))
 
     if n_clusters is not None:
-        split_proximities = _get_split_proximities(dataset, split, n_clusters)
+        split_proximities = _get_split_proximities(dataset, split, n_clusters, sparse_proximities)
 
     for idx, index in enumerate(
         tqdm(_get_split_indices(split), desc=f'Processing PERSONA {split} split')
@@ -93,7 +96,12 @@ def _get_split_indices(split: str) -> list[int]:
     return _get_split_indices._splits[split]
 
 
-def _get_split_proximities(dataset: Dataset, split: str, n_clusters: int) -> list[list[float]]:
+def _get_split_proximities(
+    dataset: datasets.Dataset,
+    split: str,
+    n_clusters: int,
+    sparse_proximities: bool
+) -> list[list[float]]:
     """Get the cluster proximities of examples from the specified split of the PERSONA dataset."""
     if not hasattr(_get_split_proximities, '_splits'):
         encoder = OneHotEncoder(handle_unknown='ignore')
@@ -117,7 +125,12 @@ def _get_split_proximities(dataset: Dataset, split: str, n_clusters: int) -> lis
                 features = scipy.sparse.hstack((numerical_features, categorical_features))
                 distances = kmeans.transform(features)
 
-            proximities = scipy.special.softmax(-np.log(distances), axis=-1)
+            if sparse_proximities:
+                proximities = scipy.special.softmax(-distances, axis=-1)
+            else:
+                proximities = scipy.special.softmax(-np.log(distances), axis=-1)
+                proximities[proximities < 0.01] = 0.
+
             return proximities.tolist()
 
         _get_split_proximities._splits = {

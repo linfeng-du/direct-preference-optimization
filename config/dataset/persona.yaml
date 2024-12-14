@@ -1,3 +1,4 @@
 dataset: persona
-prepend_persona: ???
-n_clusters: ???
+prepend_persona: false
+n_clusters: null
+sparse_proximities: null
