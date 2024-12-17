@@ -71,7 +71,7 @@ def load_persona(
 
 def _get_split_indices(split: str) -> list[int]:
     """Get the indices of examples from the specified split of the PERSONA dataset."""
-    if not hasattr(_get_split_indices, '_splits'):
+    if not hasattr(_get_split_indices, '_cache'):
         # Create train, test, and test_unseen splits for the PERSONA dataset
         # The dataset contains 1,000 personas, each with 100 training and testing examples
         # Randomly reserve 200 personas as the unseen test set
@@ -83,17 +83,14 @@ def _get_split_indices(split: str) -> list[int]:
         def get_example_indices(personas, start, end):
             return [index for p in personas for index in range(p * 200 + start, p * 200 + end)]
 
-        train_indices = get_example_indices(seen_personas, start=0, end=100)
-        test_indices = get_example_indices(seen_personas, start=100, end=200)
-        test_unseen_indices = get_example_indices(unseen_personas, start=0, end=200)
-
-        _get_split_indices._splits = {
-            'train': train_indices,
-            'test': test_indices,
-            'test_unseen': test_unseen_indices
+        cache = {
+            'train': get_example_indices(seen_personas, start=0, end=100),
+            'test': get_example_indices(seen_personas, start=100, end=200),
+            'test_unseen': get_example_indices(unseen_personas, start=0, end=200)
         }
+        setattr(_get_split_indices, '_cache', cache)
 
-    return _get_split_indices._splits[split]
+    return getattr(_get_split_indices, '_cache')[split]
 
 
 def _get_split_proximities(
@@ -103,7 +100,9 @@ def _get_split_proximities(
     sparse_proximities: bool
 ) -> list[list[float]]:
     """Get the cluster proximities of examples from the specified split of the PERSONA dataset."""
-    if not hasattr(_get_split_proximities, '_splits'):
+    cache_key = f'_cache_{(n_clusters, sparse_proximities)}'
+
+    if not hasattr(_get_split_proximities, cache_key):
         encoder = OneHotEncoder(handle_unknown='ignore')
         kmeans = KMeans(n_clusters, n_init='auto', random_state=42)
 
@@ -129,17 +128,17 @@ def _get_split_proximities(
                 proximities = scipy.special.softmax(-distances, axis=-1)
             else:
                 proximities = scipy.special.softmax(-np.log(distances), axis=-1)
-                proximities[proximities < 0.01] = 0.
 
             return proximities.tolist()
 
-        _get_split_proximities._splits = {
+        cache = {
             'train': compute_split_proximities(split='train'),
             'test': compute_split_proximities(split='test'),
             'test_unseen': compute_split_proximities(split='test_unseen')
         }
+        setattr(_get_split_proximities, cache_key, cache)
 
-    return _get_split_proximities._splits[split]
+    return getattr(_get_split_proximities, cache_key)[split]
 
 
 def _extract_raw_features(persona: str) -> list[str | int]:
