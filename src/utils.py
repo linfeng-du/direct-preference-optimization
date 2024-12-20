@@ -1,6 +1,10 @@
+import random
 import inspect
 import logging
 
+import numpy as np
+
+import torch
 import torch.nn as nn
 from accelerate.state import PartialState
 
@@ -22,6 +26,14 @@ def log_accelerate(message: str, level: str = 'info', on_all_processes: bool = F
         log(message, level)
     elif state.is_local_main_process:
         log(message, level)
+
+
+def seed_everything(seed: int) -> None:
+    """Seed everything for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def disable_dropout(model: nn.Module) -> None:

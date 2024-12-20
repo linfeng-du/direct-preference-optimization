@@ -13,7 +13,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 
 from adapters import get_controller
 from trainer import AccelerateTrainer
-from utils import disable_dropout, count_trainable_parameters, log_accelerate
+from utils import seed_everything, disable_dropout, count_trainable_parameters, log_accelerate
 
 
 @hydra.main(version_base=None, config_path='../config', config_name='config')
@@ -41,8 +41,10 @@ def main(config: DictConfig):
         )
         config.eval_every = eval_every
 
-    log_accelerate('Building policy...')
+    log_accelerate(f'Setting random seed to {config.seed}...')
+    seed_everything(config.seed)
 
+    log_accelerate('Building policy...')
     policy = AutoModelForCausalLM.from_pretrained(
         config.model.model,
         torch_dtype=getattr(torch, config.model.policy_dtype),
@@ -51,7 +53,6 @@ def main(config: DictConfig):
     disable_dropout(policy)
 
     log_accelerate(f'Inserting {config.adapter.adapter} adapters...')
-
     controller = get_controller(**config.adapter)
     controller.insert_adapters(policy, config.model.target_modules)
 
@@ -59,7 +60,6 @@ def main(config: DictConfig):
     log_accelerate(f'Number of trainable parameters: {num_params}')
 
     log_accelerate('Building reference model...')
-
     reference_model = AutoModelForCausalLM.from_pretrained(
         config.model.model,
         torch_dtype=getattr(torch, config.model.reference_dtype),

@@ -39,12 +39,7 @@ class PreferenceDataset(Dataset):
             for idx, (chosen, rejected) in enumerate(pairs):
                 indices.append(len(self.examples))
                 others = {key: value[idx] for key, value in prompt_data.items()}
-                self.examples.append((
-                    prompt,
-                    responses[chosen],
-                    responses[rejected],
-                    others
-                ))
+                self.examples.append((prompt, responses[chosen], responses[rejected], others))
 
             self.grouped_indices.append(indices)
 

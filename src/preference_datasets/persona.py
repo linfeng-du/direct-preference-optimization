@@ -40,10 +40,10 @@ def load_persona(
     if n_clusters is not None:
         split_proximities = _get_split_proximities(dataset, split, n_clusters, sparse_proximities)
 
-    for idx, index in enumerate(
+    for split_index, example_index in enumerate(
         tqdm(_get_split_indices(split), desc=f'Processing PERSONA {split} split')
     ):
-        example = dataset[index]
+        example = dataset[example_index]
 
         prompt = example['instruction']
         chosen = example['data']
@@ -63,7 +63,7 @@ def load_persona(
         data[prompt]['persona'].append(persona)
 
         if n_clusters is not None:
-            proximities = split_proximities[idx]
+            proximities = split_proximities[split_index]
             data[prompt]['proximities'].append(proximities)
 
     return data
@@ -72,21 +72,39 @@ def load_persona(
 def _get_split_indices(split: str) -> list[int]:
     """Get the indices of examples from the specified split of the PERSONA dataset."""
     if not hasattr(_get_split_indices, '_cache'):
-        # Create train, test, and test_unseen splits for the PERSONA dataset
-        # The dataset contains 1,000 personas, each with 100 training and testing examples
-        # Randomly reserve 200 personas as the unseen test set
-        unseen_personas = random.Random(x=42).sample(range(1000), k=200)
+        # Create training, validation, test, and unseen test splits
+        # The dataset contains 1,000 personas, each with 200 response pairs
+        generator = random.Random(x=42)
+
+        # Randomly set aside 100 personas as the unseen test set
+        unseen_personas = generator.sample(range(1000), k=100)
         seen_personas = [p for p in range(1000) if p not in unseen_personas]
 
-        # For each persona, the first 100 examples are used for training,
-        # and the following 100 examples are used for testing
-        def get_example_indices(personas, start, end):
-            return [index for p in personas for index in range(p * 200 + start, p * 200 + end)]
+        test_unseen_indices = [
+            index
+            for p in unseen_personas
+            for index in range(p * 200, (p + 1) * 200)
+        ]
+
+        # For each of the remaining 900 personas, randomly split its 200 responses
+        # into training, validation, and test sets in a 8:1:1 ratio
+        train_indices = []
+        validation_indices = []
+        test_indices = []
+
+        for persona in seen_personas:
+            indices = list(range(persona * 200, (persona + 1) * 200))
+            generator.shuffle(indices)
+
+            train_indices.extend(indices[:160])
+            validation_indices.extend(indices[160:180])
+            test_indices.extend(indices[180:])
 
         cache = {
-            'train': get_example_indices(seen_personas, start=0, end=100),
-            'test': get_example_indices(seen_personas, start=100, end=200),
-            'test_unseen': get_example_indices(unseen_personas, start=0, end=200)
+            'train': train_indices,
+            'validation': validation_indices,
+            'test': test_indices,
+            'test_unseen': test_unseen_indices
         }
         setattr(_get_split_indices, '_cache', cache)
 
@@ -125,7 +143,8 @@ def _get_split_proximities(
                 distances = kmeans.transform(features)
 
             if sparse_proximities:
-                proximities = scipy.special.softmax(-distances, axis=-1)
+                proximities = np.zeros_like(distances)
+                proximities[np.arange(distances.shape[0]), np.argmin(distances, axis=-1)] = 1.
             else:
                 proximities = scipy.special.softmax(-np.log(distances), axis=-1)
 
@@ -133,6 +152,7 @@ def _get_split_proximities(
 
         cache = {
             'train': compute_split_proximities(split='train'),
+            'validation': compute_split_proximities(split='validation'),
             'test': compute_split_proximities(split='test'),
             'test_unseen': compute_split_proximities(split='test_unseen')
         }

@@ -1,10 +1,7 @@
 import os
 import json
-import random
 from time import perf_counter
 from collections import defaultdict
-
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -35,39 +32,42 @@ class AccelerateTrainer:
     ):
         """Trainer that leverages Hugging Face Accelerate for distributed training."""
         self.config = config
+        self.policy = policy
         self.controller = controller
+        self.reference_model = reference_model
         self.accelerator = accelerator
 
         self.example_count = None
 
-        train_loader, test_loader, test_unseen_loader = self._load_dataset()
-        optimizer = getattr(optim, self.config.optimizer)(
-            [p for p in policy.parameters() if p.requires_grad],
-            lr=self.config.lr
-        )
-        scheduler = optim.lr_scheduler.LambdaLR(
-            optimizer,
-            lambda step: min(1., (step + 1) / (self.config.warmup_steps + 1))
-        )
+        (
+            self.train_loader,
+            self.validation_loader,
+            self.test_loader,
+            self.test_unseen_loader
+         ) = self._load_dataset_splits()
+        self.optimizer, self.scheduler = self._load_optimizer_and_scheduler()
+
         (
             self.policy,
             self.reference_model,
             self.train_loader,
+            self.validation_loader,
             self.test_loader,
             self.test_unseen_loader,
             self.optimizer,
             self.scheduler
         ) = self.accelerator.prepare(
-            policy,
-            reference_model,
-            train_loader,
-            test_loader,
-            test_unseen_loader,
-            optimizer,
-            scheduler
+            self.policy,
+            self.reference_model,
+            self.train_loader,
+            self.validation_loader,
+            self.test_loader,
+            self.test_unseen_loader,
+            self.optimizer,
+            self.scheduler
         )
 
-    def _load_dataset(self):
+    def _load_dataset_splits(self):
         tokenizer = AutoTokenizer.from_pretrained(self.config.model.model)
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -101,6 +101,10 @@ class AccelerateTrainer:
         })
         loader_kwargs.update({'batch_size': self.config.eval_batch_size})
 
+        validation_dataset = PreferenceDataset(split='validation', **dataset_kwargs)
+        validation_sampler = PreferenceSampler(validation_dataset, **sampler_kwargs)
+        validation_loader = DataLoader(validation_dataset, sampler=validation_sampler, **loader_kwargs)
+
         test_dataset = PreferenceDataset(split='test', **dataset_kwargs)
         test_sampler = PreferenceSampler(test_dataset, **sampler_kwargs)
         test_loader = DataLoader(test_dataset, sampler=test_sampler, **loader_kwargs)
@@ -109,15 +113,24 @@ class AccelerateTrainer:
         test_unseen_sampler = PreferenceSampler(test_unseen_dataset, **sampler_kwargs)
         test_unseen_loader = DataLoader(test_unseen_dataset, sampler=test_unseen_sampler, **loader_kwargs)
 
-        return train_loader, test_loader, test_unseen_loader
+        return train_loader, validation_loader, test_loader, test_unseen_loader
+
+    def _load_optimizer_and_scheduler(self):
+        optimizer = getattr(optim, self.config.optimizer)(
+            [p for p in self.policy.parameters() if p.requires_grad],
+            lr=self.config.lr
+        )
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lambda step: min(1., (step + 1) / (self.config.warmup_steps + 1))
+        )
+        return optimizer, scheduler
 
     def train(self):
         """Begin preference training with periodic evaluation."""
-        torch.manual_seed(self.config.seed)
-        np.random.seed(self.config.seed)
-        random.seed(self.config.seed)
-
         self.reference_model.eval()
+
+        best_validation_accuracy = 0.
         local_example_count = 0
         local_example_count_train = None
 
@@ -130,9 +143,13 @@ class AccelerateTrainer:
                     throughput = local_example_count_train / (end_time - start_time)
                     log_accelerate(f'Training throughput: {throughput:.4g} examples/s')
 
-                test_metrics = self.evaluate(self.test_loader, split='test')
-                test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
-                test_metrics.update(test_unseen_metrics)
+                validation_metrics = self.evaluate(self.validation_loader, split='validation')
+                validation_accuracy = validation_metrics['logp_validation/accuracy']
+
+                if validation_accuracy > best_validation_accuracy:
+                    log_accelerate(f'Updating best validation ranking accuracy to {validation_accuracy}...')
+                    best_validation_accuracy = validation_accuracy
+                    self.save('BEST_VALIDATION')
 
                 start_time = perf_counter()
                 local_example_count_train = 0
@@ -152,10 +169,9 @@ class AccelerateTrainer:
             local_example_count += batch['prompt_input_ids'].size(dim=0)
             local_example_count_train += batch['prompt_input_ids'].size(dim=0)
 
-        test_metrics = self.evaluate(self.test_loader, split='test')
-        test_unseen_metrics = self.evaluate(self.test_unseen_loader, split='test_unseen')
-        test_metrics.update(test_unseen_metrics)
-        self.save('LATEST', test_metrics)
+        self.load('BEST_VALIDATION')
+        self.evaluate(self.test_loader, split='test')
+        self.evaluate(self.test_unseen_loader, split='test_unseen')
 
     @torch.no_grad()
     def evaluate(self, eval_loader, split):
@@ -178,7 +194,7 @@ class AccelerateTrainer:
         all_metrics = {key: sum(value) / len(value) for key, value in all_metrics.items()}
         formatted_metrics = {key: f'{value:.5g}' for key, value in all_metrics.items()}
         log_accelerate(
-            f'{split} split result after {self.example_count} training examples:\n'
+            f'{split} results after {self.example_count} training examples:\n'
             f'{json.dumps(formatted_metrics, indent=4)}'
         )
         return all_metrics
@@ -252,28 +268,42 @@ class AccelerateTrainer:
         rejected_logps = logps[batch['chosen_input_ids'].size(dim=0):]
         return chosen_logps, rejected_logps
 
-    def save(self, version: str, metrics: dict) -> None:
-        """Save the policy, optimizer, and scheduler states to disk."""
-        output_dir = os.path.join(self.config.run_dir, version)
-        os.makedirs(output_dir, exist_ok=True)
-        log_accelerate(f'Writing checkpoints to {output_dir}...')
+    def load(self, version: str) -> int:
+        """Load the policy, optimizer, and scheduler states from disk."""
+        checkpoint_dir = os.path.join(self.config.run_dir, version)
+        log_accelerate(f'Loading checkpoints from {checkpoint_dir}...')
 
-        self.accelerator.save(
-            {
-                'step': self.example_count,
-                'metrics': metrics,
-                'state': self.accelerator.unwrap_model(self.policy).state_dict()
-            },
-            os.path.join(output_dir, 'policy.pt')
-        )
-        self.accelerator.save(
-            {'state': self.optimizer.state_dict()},
-            os.path.join(output_dir, 'optimizer.pt')
-        )
-        self.accelerator.save(
-            {'state': self.scheduler.state_dict()},
-            os.path.join(output_dir, 'scheduler.pt')
-        )
+        policy_path = os.path.join(checkpoint_dir, 'policy.pt')
+        policy_state = torch.load(policy_path, map_location='cpu', weights_only=True)
+        self.accelerator.unwrap_model(self.policy).load_state_dict(policy_state['state'])
+
+        optimizer_path = os.path.join(checkpoint_dir, 'optimizer.pt')
+        optimizer_state = torch.load(optimizer_path, map_location='cpu', weights_only=True)
+        self.optimizer.load_state_dict(optimizer_state['state'])
+
+        scheduler_path = os.path.join(checkpoint_dir, 'scheduler.pt')
+        scheduler_state = torch.load(scheduler_path, map_location='cpu', weights_only=True)
+        self.scheduler.load_state_dict(scheduler_state['state'])
+
+        return policy_state['n_examples']
+
+    def save(self, version: str) -> None:
+        """Save the policy, optimizer, and scheduler states to disk."""
+        checkpoint_dir = os.path.join(self.config.run_dir, version)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        log_accelerate(f'Writing checkpoints to {checkpoint_dir}...')
+
+        policy_state = self.accelerator.unwrap_model(self.policy).state_dict()
+        policy_path = os.path.join(checkpoint_dir, 'policy.pt')
+        self.accelerator.save({'n_examples': self.example_count, 'state': policy_state}, policy_path)
+
+        optimizer_state = self.optimizer.state_dict()
+        optimizer_path = os.path.join(checkpoint_dir, 'optimizer.pt')
+        self.accelerator.save({'state': optimizer_state}, optimizer_path)
+
+        scheduler_state = self.scheduler.state_dict()
+        scheduler_path = os.path.join(checkpoint_dir, 'scheduler.pt')
+        self.accelerator.save({'state': scheduler_state}, scheduler_path)
 
 
 def _concatenate_responses(batch: dict[str, list[str] | torch.Tensor]) -> dict[str, torch.Tensor]:
