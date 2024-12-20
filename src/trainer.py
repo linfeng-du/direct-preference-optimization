@@ -169,7 +169,7 @@ class AccelerateTrainer:
             local_example_count += batch['prompt_input_ids'].size(dim=0)
             local_example_count_train += batch['prompt_input_ids'].size(dim=0)
 
-        self.load('BEST_VALIDATION')
+        self.example_count = self.load('BEST_VALIDATION')
         self.evaluate(self.test_loader, split='test')
         self.evaluate(self.test_unseen_loader, split='test_unseen')
 
