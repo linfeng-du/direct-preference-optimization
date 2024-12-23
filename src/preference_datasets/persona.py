@@ -146,7 +146,8 @@ def _get_split_proximities(
                 proximities = np.zeros_like(distances)
                 proximities[np.arange(distances.shape[0]), np.argmin(distances, axis=-1)] = 1.
             else:
-                proximities = scipy.special.softmax(-np.log(distances), axis=-1)
+                inverse_distances = 1. / distances
+                proximities = inverse_distances / np.sum(inverse_distances, axis=-1, keepdims=True)
 
             return proximities.tolist()
 
