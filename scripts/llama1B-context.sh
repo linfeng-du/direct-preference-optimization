@@ -9,7 +9,7 @@ done
 
 accelerate launch src/train.py \
     seed=$seed \
-    exp_name=llama1B-persona \
+    exp_name=llama1B-context \
     dataset=persona \
     dataset.prepend_persona=true \
     model=llama1B-instruct \

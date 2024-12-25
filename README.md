@@ -1,15 +1,15 @@
 ## Project Structure
 The core packages and modules in this project are:
 
-- `preference_datasets`:
-    A package of preference datasets and necessary utilities for data loading.
-    - `dataset.py`: PyTorch dataset, sampler, and collate function.
+- `preference_datasets`
     - `persona.py`: Function for loading and processing the PERSONA dataset.
 
-- `adapters`:
+- `adapters`
     A package of adapters.
     Each adapter module has a controller and an adapter layer.
     The controller swaps in the adapter layers and manages layer attributes.
+
+- `dataset.py`: PyTorch dataset, sampler, and collate function for data loading.
 
 - `trainer.py`: Trainer class that supports distrubuted training via Hugging Face Accelerate.
 

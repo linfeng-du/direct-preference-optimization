@@ -12,7 +12,7 @@ done
 r=$((16 / $n_clusters))
 accelerate launch src/train.py \
     seed=$seed \
-    exp_name=llama1B-mixture/n_clusters_$n_clusters-sparse_proximities_$sparse_proximities \
+    exp_name=llama1B-cluster/n_clusters_$n_clusters-sparse_proximities_$sparse_proximities \
     dataset=persona \
     dataset.n_clusters=$n_clusters \
     dataset.sparse_proximities=$sparse_proximities \
